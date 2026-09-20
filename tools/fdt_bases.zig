@@ -119,7 +119,11 @@ pub fn parse(fdt: *const dtree.Reader, out: *Bases) void {
                 if (std.mem.eql(u8, p.name, "#size-cells") and p.value.len >= 4)
                     cur.size_cells = std.mem.readInt(u32, p.value[0..4], .big);
                 if (std.mem.eql(u8, p.name, "compatible")) {
+                    // jedec,spi-nor is the SPI-NOR on River; cfi-flash is the
+                    // parallel NOR on QEMU's aarch64 virt (flash@0). Both are
+                    // the XIP boot flash class.
                     if (std.mem.indexOf(u8, p.value, "jedec,spi-nor") != null) cur.is_flash = true;
+                    if (std.mem.indexOf(u8, p.value, "cfi-flash") != null) cur.is_flash = true;
                     if (std.mem.indexOf(u8, p.value, "mmio-sram") != null) cur.is_sram = true;
                 }
                 // A `fixed-partitions` leaf's reg = <offset size> (1 cell each);

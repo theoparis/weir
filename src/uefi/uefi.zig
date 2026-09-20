@@ -7,10 +7,11 @@
 //! app (the PMP grant lets them reach MMIO directly), as real boot services do.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const uefi = std.os.uefi;
 const console = @import("../console/console.zig");
-const clint = @import("../arch/riscv/clint.zig");
-const cpu = @import("../arch/riscv/cpu.zig");
+const arch = @import("../arch.zig");
+const events = @import("events.zig");
 const varstore = @import("varstore.zig");
 const handledb = @import("handledb.zig");
 const blockio = @import("blockio.zig");
@@ -28,11 +29,6 @@ const time = @import("../time.zig");
 
 const Status = uefi.Status;
 const tables = uefi.tables;
-
-// SiFive-style test finisher, address from device-tree discovery.
-fn finisher() *volatile u32 {
-    return @ptrFromInt(platform.resetBase());
-}
 
 // Memory layout advertised to the app, derived from build-time ram_base (see
 // mem.zig). Firmware and loaded image sit low. Pages come from the high half.
@@ -74,6 +70,11 @@ const DEVICE_TREE_GUID = uefi.Guid{
     .clock_seq_low = 0x0b,
     .node = .{ 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0 },
 };
+
+// RISCV_EFI_BOOT_PROTOCOL: how the Linux EFI stub learns the boot hartid. There
+// is no AArch64 equivalent, so a build for another architecture installs
+// nothing here; the OS finds its boot CPU in the tables it is handed.
+const have_riscv_boot = builtin.cpu.arch == .riscv64;
 
 // RISCV_EFI_BOOT_PROTOCOL: how the Linux EFI stub learns the boot hartid.
 const RISCV_BOOT_GUID = uefi.Guid{
@@ -353,7 +354,25 @@ fn installProtocolInterface(
 /// (guid, interface) pairs on one handle, creating it when `*handle` is null.
 /// systemd-boot registers the Linux initrd with it (a Device Path plus a
 /// LoadFile2 on a fresh handle).
-fn installMultipleProtocolInterfaces(handle: *?*anyopaque, ...) callconv(.c) usize {
+/// InstallMultipleProtocolInterfaces is variadic, and each architecture lays its
+/// variadic arguments out differently: RISC-V puts the first ones in a0..a7 and
+/// AArch64 in x1..x7. Zig compiles C varargs for one and not the other
+/// (std.builtin.VaList is a compile error on AArch64), so each port brings its own
+/// argument reader and this picks it. The list they walk is the same on both.
+// An `if` chain rather than a `switch`: each branch names a function whose body
+// is only valid for its own architecture, and only the taken branch is analyzed.
+const installMultipleProtocolInterfaces: *const anyopaque = if (builtin.cpu.arch == .riscv64)
+    @ptrCast(&riscvInstallMultipleProtocolInterfaces)
+else if (builtin.cpu.arch == .aarch64)
+    @ptrCast(&aarch64InstallMultipleProtocolInterfaces)
+else
+    @compileError("no variadic argument access for this target");
+
+/// InstallMultipleProtocolInterfaces: install a null-terminated list of
+/// (guid, interface) pairs on one handle, creating it when `*handle` is null.
+/// systemd-boot registers the Linux initrd with it (a Device Path plus a
+/// LoadFile2 on a fresh handle).
+fn riscvInstallMultipleProtocolInterfaces(handle: *?*anyopaque, ...) callconv(.c) usize {
     var va = @cVaStart();
     defer @cVaEnd(&va);
     while (true) {
@@ -365,6 +384,79 @@ fn installMultipleProtocolInterfaces(handle: *?*anyopaque, ...) callconv(.c) usi
         handle.* = @ptrCast(h);
     }
     return ok;
+}
+
+/// The AArch64 form of the same call. It reads the arguments the way the ABI
+/// lays them out instead of through @cVaStart, so this is the trampoline the
+/// boot-services slot holds: it has no parameters because it is not a function
+/// with a signature, but a stand-in for the prologue a compiler would have
+/// emitted for a variadic callee. x0 is the handle, x1..x7 the first variadic
+/// arguments, and the caller's stack continues the list. It is not exported —
+/// only its address is used — so a build for another architecture does not try
+/// to assemble it.
+///
+/// The capture area is a single static buffer, so a nested call would overwrite
+/// an outer one's arguments. The EFI interface is used the way a bootloader uses
+/// it: build a handle, install a couple of protocols, return.
+fn aarch64InstallMultipleProtocolInterfaces() callconv(.naked) usize {
+    asm volatile (
+        \\ adrp x9, mpi_args
+        \\ add x9, x9, :lo12:mpi_args
+        \\ stp x0, x1, [x9]
+        \\ stp x2, x3, [x9, #16]
+        \\ stp x4, x5, [x9, #32]
+        \\ stp x6, x7, [x9, #48]
+        \\ mov x10, sp
+        \\ str x10, [x9, #64]
+        \\ mov x0, x9
+        \\ b walksProtocolList
+    );
+}
+
+/// The captured argument list: the variadic argument registers, then the stack
+/// pointer they continue from.
+const VariadicArgs = extern struct {
+    regs: [8]usize,
+    stack: usize,
+};
+
+// Exported rather than private because the trampoline above reaches it by name
+// from assembly, which only sees unmangled symbols.
+// zippy:ignore unsafe_undefined -- the trampoline fills it before it is read
+export var mpi_args: VariadicArgs = undefined;
+
+/// Walk the captured list and install each pair, stopping at the null guid.
+export fn walksProtocolList(args: *const VariadicArgs) callconv(.c) usize {
+    var next: usize = 1; // x0 is the handle, not a list entry
+    var stack_off: usize = 0;
+    const handle: *?*anyopaque = @ptrFromInt(args.regs[0]);
+    while (true) {
+        const guid_word = nextArg(args, &next, &stack_off) orelse
+            return @intFromEnum(Status.invalid_parameter);
+        if (guid_word == 0) break;
+        const guid: *const uefi.Guid = @ptrFromInt(guid_word);
+        const interface = nextArg(args, &next, &stack_off) orelse
+            return @intFromEnum(Status.invalid_parameter);
+        const existing: ?*handledb.Handle = if (handle.*) |hp| @ptrCast(@alignCast(hp)) else null;
+        const h = handledb.install(existing, guid, @ptrFromInt(interface)) orelse
+            return @intFromEnum(Status.out_of_resources);
+        handle.* = @ptrCast(h);
+    }
+    return ok;
+}
+
+/// The next variadic argument: from the argument registers while they last, then
+/// from the caller's stack, which is where the ABI continues the list.
+fn nextArg(args: *const VariadicArgs, next: *usize, stack_off: *usize) ?usize {
+    if (next.* < args.regs.len) {
+        const value = args.regs[next.*];
+        next.* += 1;
+        return value;
+    }
+    if (stack_off.* > 64 * @sizeOf(usize)) return null; // a bound, so a corrupt list cannot run away
+    const word: *const usize = @ptrFromInt(args.stack + stack_off.*);
+    stack_off.* += @sizeOf(usize);
+    return word.*;
 }
 
 /// InstallConfigurationTable: add, replace, or remove a config table entry. The
@@ -510,10 +602,10 @@ fn inReadKey(self: *uefi.protocol.SimpleTextInput, key: *anyopaque) callconv(.c)
     // Give a partial escape sequence a short window to finish arriving. A
     // terminal sends the whole sequence back to back, so a few milliseconds is
     // plenty. Past the window a lone ESC is the Escape key.
-    const deadline = clint.time() + timerTicks(20_000); // 2 ms in 100 ns units
+    const deadline = arch.time.now() + events.ticks(20_000); // 2 ms in 100 ns units
     var dec = decodeKey(key_buf[0..key_len]);
     while (dec.used == 0) {
-        if (clint.time() >= deadline) {
+        if (arch.time.now() >= deadline) {
             dec = .{ .scan = SCAN_ESC, .char = 0, .used = 1 };
             break;
         }
@@ -700,11 +792,11 @@ fn setMem(buffer: [*]u8, size: usize, value: u8) callconv(.c) void {
 
 fn stall(microseconds: usize) callconv(.c) usize {
     tr("stall");
-    // 1 microsecond is 10 UEFI timer units (100 ns each). timerTicks turns those
-    // into CLINT ticks through the SoC timebase, so the delay holds on a board
-    // whose mtime does not run at 10 MHz.
-    const target = clint.time() + timerTicks(@as(u64, microseconds) * 10);
-    while (clint.time() < target) {}
+    // 1 microsecond is 10 UEFI timer units (100 ns each). events.ticks turns
+    // those into counter ticks at the rate the arch layer reports, so the delay
+    // holds on a board whose counter does not run at the rate this one does.
+    const target = arch.time.now() + events.ticks(@as(u64, microseconds) * 10);
+    while (arch.time.now() < target) {}
     return ok;
 }
 
@@ -749,8 +841,7 @@ fn exitApp(
     _ = status;
     _ = data_size;
     _ = data;
-    finisher().* = 0x5555; // power off
-    cpu.halt();
+    arch.cpu.powerOff();
 }
 
 // --- Image loading ----------------------------------------------------------
@@ -879,30 +970,15 @@ fn unloadImage(image: uefi.Handle) callconv(.c) usize {
 // --- Events and the timer ---------------------------------------------------
 //
 // A bootloader creates a timer event, arms it, and waits on it together with the
-// console's key event to run a menu countdown. Weir keeps a small event pool.
-// The timer runs off the CLINT, the key event off the UART. Neither uses an
-// interrupt: WaitForEvent polls both until one is ready.
+// console's key event to run a menu countdown. The pool and the timer arithmetic
+// live in events.zig, because MP Services signals events too. The timer reads the
+// arch layer's counter and the key event the UART. Neither uses an interrupt:
+// WaitForEvent polls both until one is ready.
 
-const EVT_TIMER: u32 = 0x8000_0000;
-const EventNotify = *const fn (*anyopaque, ?*anyopaque) callconv(.c) void;
-
-const Event = struct {
-    used: bool = false,
-    is_timer: bool = false,
-    is_wait_key: bool = false,
-    signaled: bool = false, // set by an explicit SignalEvent
-    notify_fn: ?EventNotify = null,
-    notify_ctx: ?*anyopaque = null,
-    timer_armed: bool = false,
-    periodic: bool = false,
-    period: u64 = 0, // CLINT ticks between periodic firings
-    deadline: u64 = 0, // CLINT time value the timer fires at
-};
-
-const MAX_EVENTS = 16;
-var events: [MAX_EVENTS]Event = undefined;
-// The one key event ConIn exposes as WaitForKey. prepare() allocates it.
-var wait_key_event: *Event = undefined; // zippy:ignore unsafe_undefined
+// The pool itself is events.zig; MP Services signals events too.
+// The one key event ConIn exposes as WaitForKey. prepare() allocates it from the
+// pool and gives it the console's readiness test.
+var wait_key_event: *events.Event = undefined; // zippy:ignore unsafe_undefined
 
 // Raw console bytes read from the UART but not yet decoded into keystrokes. An
 // arrow key arrives as a multi-byte escape sequence (ESC [ A), so a small FIFO
@@ -936,58 +1012,16 @@ fn keyReady() bool {
     return key_len > 0;
 }
 
-// UEFI timer units are 100 ns. Convert to CLINT ticks via the SoC timebase, so
-// the timing holds on a board whose mtime does not run at 10 MHz.
-fn timerTicks(hundred_ns: u64) u64 {
-    return hundred_ns * soc.timebase_hz / 10_000_000;
-}
-
-fn eventAlloc() ?*Event {
-    for (&events) |*e| {
-        if (!e.used) {
-            e.* = .{};
-            e.used = true;
-            return e;
-        }
-    }
-    return null;
-}
-
-/// Validate an EFI_EVENT before dereferencing it: a bogus handle must not deref
-/// wild. Checks the pointer lands on a live slot of the event pool.
-fn eventOf(handle: ?*anyopaque) ?*Event {
-    const e: *Event = @ptrCast(@alignCast(handle orelse return null));
-    const base = @intFromPtr(&events[0]);
-    const p = @intFromPtr(e);
-    if (p < base or p >= base + @sizeOf(Event) * MAX_EVENTS) return null;
-    if ((p - base) % @sizeOf(Event) != 0) return null;
-    return if (e.used) e else null;
-}
-
-/// Is the event ready (its wait would return it now)? Advances a periodic timer
-/// and disarms a one-shot timer that has just fired.
-fn eventReady(e: *Event) bool {
-    if (e.signaled) return true;
-    if (e.is_wait_key) return keyReady();
-    if (e.is_timer and e.timer_armed and clint.time() >= e.deadline) {
-        if (e.periodic) e.deadline += e.period else e.timer_armed = false;
-        return true;
-    }
-    return false;
-}
-
 fn createEvent(
     etype: u32,
     notify_tpl: usize,
-    notify_fn: ?EventNotify,
+    notify_fn: ?events.NotifyFn,
     notify_ctx: ?*anyopaque,
     out: *?*anyopaque,
 ) callconv(.c) usize {
     _ = notify_tpl;
-    const e = eventAlloc() orelse return @intFromEnum(Status.out_of_resources);
-    e.is_timer = (etype & EVT_TIMER) != 0;
-    e.notify_fn = notify_fn;
-    e.notify_ctx = notify_ctx;
+    const e = events.create(etype, notify_fn, notify_ctx) orelse
+        return @intFromEnum(Status.out_of_resources);
     out.* = @ptrCast(e);
     return ok;
 }
@@ -995,7 +1029,7 @@ fn createEvent(
 fn createEventEx( // zippy:ignore too_many_params UEFI CreateEventEx ABI is fixed
     etype: u32,
     notify_tpl: usize,
-    notify_fn: ?EventNotify,
+    notify_fn: ?events.NotifyFn,
     notify_ctx: ?*anyopaque,
     group: ?*const anyopaque,
     out: *?*anyopaque,
@@ -1005,25 +1039,8 @@ fn createEventEx( // zippy:ignore too_many_params UEFI CreateEventEx ABI is fixe
 }
 
 fn setTimer(event: ?*anyopaque, delay: u32, trigger_time: u64) callconv(.c) usize {
-    const e = eventOf(event) orelse return @intFromEnum(Status.invalid_parameter);
-    switch (delay) {
-        0 => { // cancel
-            e.timer_armed = false;
-            e.periodic = false;
-        },
-        1 => { // periodic
-            e.timer_armed = true;
-            e.periodic = true;
-            e.period = timerTicks(trigger_time);
-            e.deadline = clint.time() + e.period;
-        },
-        2 => { // relative
-            e.timer_armed = true;
-            e.periodic = false;
-            e.deadline = clint.time() + timerTicks(trigger_time);
-        },
-        else => return @intFromEnum(Status.invalid_parameter),
-    }
+    const e = events.of(event) orelse return @intFromEnum(Status.invalid_parameter);
+    if (!events.setTimer(e, delay, trigger_time)) return @intFromEnum(Status.invalid_parameter);
     return ok;
 }
 
@@ -1031,7 +1048,7 @@ fn waitForEvent(event_len: usize, evs: [*]const ?*anyopaque, index: *usize) call
     if (event_len == 0) return @intFromEnum(Status.invalid_parameter);
     var i: usize = 0;
     while (i < event_len) : (i += 1) {
-        if (eventOf(evs[i]) == null) {
+        if (events.of(evs[i]) == null) {
             index.* = i;
             return @intFromEnum(Status.invalid_parameter);
         }
@@ -1040,9 +1057,9 @@ fn waitForEvent(event_len: usize, evs: [*]const ?*anyopaque, index: *usize) call
     while (true) {
         i = 0;
         while (i < event_len) : (i += 1) {
-            const e = eventOf(evs[i]).?;
-            if (eventReady(e)) {
-                e.signaled = false;
+            const e = events.of(evs[i]).?;
+            if (events.ready(e)) {
+                events.consume(e);
                 index.* = i;
                 return ok;
             }
@@ -1051,25 +1068,24 @@ fn waitForEvent(event_len: usize, evs: [*]const ?*anyopaque, index: *usize) call
 }
 
 fn checkEvent(event: ?*anyopaque) callconv(.c) usize {
-    const e = eventOf(event) orelse return @intFromEnum(Status.invalid_parameter);
-    if (eventReady(e)) {
-        e.signaled = false;
+    const e = events.of(event) orelse return @intFromEnum(Status.invalid_parameter);
+    if (events.ready(e)) {
+        events.consume(e);
         return ok;
     }
     return @intFromEnum(Status.not_ready);
 }
 
 fn signalEvent(event: ?*anyopaque) callconv(.c) usize {
-    const e = eventOf(event) orelse return @intFromEnum(Status.invalid_parameter);
-    e.signaled = true;
-    if (e.notify_fn) |f| f(@ptrCast(e), e.notify_ctx);
+    const e = events.of(event) orelse return @intFromEnum(Status.invalid_parameter);
+    events.signal(e);
     return ok;
 }
 
 fn closeEvent(event: ?*anyopaque) callconv(.c) usize {
-    const e = eventOf(event) orelse return @intFromEnum(Status.invalid_parameter);
+    const e = events.of(event) orelse return @intFromEnum(Status.invalid_parameter);
     // The key event belongs to ConIn, not the app: keep it alive.
-    if (e != wait_key_event) e.used = false;
+    if (e != wait_key_event) events.close(e);
     return ok;
 }
 
@@ -1178,12 +1194,17 @@ fn resetSystem(
     data_size: usize,
     data: ?[*]const u16,
 ) callconv(.c) noreturn {
-    _ = reset_type;
     _ = status;
     _ = data_size;
     _ = data;
-    finisher().* = 0x5555; // power off
-    cpu.halt();
+    // A cold and a warm reset are the same request to this firmware: it does not
+    // preserve anything across either, so both restart the machine. Only a
+    // shutdown asks for the power to go off, and that is the one case the
+    // platform primitive differs.
+    switch (@as(tables.ResetType, @enumFromInt(reset_type))) {
+        .shutdown => arch.cpu.powerOff(),
+        else => arch.cpu.reset(),
+    }
 }
 
 // --- Table construction -----------------------------------------------------
@@ -1244,9 +1265,9 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
 
     // Event pool, and the single key event ConIn exposes as WaitForKey. The pool
     // is empty here, so the allocation cannot fail.
-    for (&events) |*e| e.used = false;
-    wait_key_event = eventAlloc().?;
-    wait_key_event.is_wait_key = true;
+    events.init();
+    wait_key_event = events.create(0, null, null).?;
+    wait_key_event.ready_fn = keyReady;
 
     con_in = .{
         ._reset = @ptrFromInt(@intFromPtr(&inReset)),
@@ -1269,7 +1290,7 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
     put(&boot_services, "_locateHandle", &locateHandle);
     put(&boot_services, "_locateHandleBuffer", &locateHandleBuffer);
     put(&boot_services, "_installProtocolInterface", &installProtocolInterface);
-    put(&boot_services, "_installMultipleProtocolInterfaces", &installMultipleProtocolInterfaces);
+    put(&boot_services, "_installMultipleProtocolInterfaces", installMultipleProtocolInterfaces);
     put(&boot_services, "_loadImage", &loadImage);
     put(&boot_services, "_startImage", &startImage);
     put(&boot_services, "_unloadImage", &unloadImage);
@@ -1317,10 +1338,12 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
     fixCrc(tables.RuntimeServices, &runtime_services.hdr, &runtime_services);
 
     // RISC-V boot protocol (boot hartid) for the kernel stub.
-    riscv_boot = .{
-        .revision = 0x00010000,
-        .get_boot_hartid = @ptrFromInt(@intFromPtr(&getBootHartid)),
-    };
+    if (have_riscv_boot) {
+        riscv_boot = .{
+            .revision = 0x00010000,
+            .get_boot_hartid = @ptrFromInt(@intFromPtr(&getBootHartid)),
+        };
+    }
 
     // A bare End-of-Hardware device path for the loaded image.
     end_path = .{ .type = @enumFromInt(0x7f), .subtype = 0xff, .length = 4 };
@@ -1404,7 +1427,7 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
     // Populate the handle/protocol database: Loaded Image on the image handle,
     // and the RISC-V boot protocol.
     addProtocol(image_handle, &uefi.protocol.LoadedImage.guid, &loaded_image);
-    addProtocol(null, &RISCV_BOOT_GUID, &riscv_boot);
+    if (have_riscv_boot) addProtocol(null, &RISCV_BOOT_GUID, &riscv_boot);
     // EFI_TCG2_PROTOCOL so the bootloader can measure into the same event log
     // and read it back for attestation.
     if (tpm.isAvailable()) tcg2.install();

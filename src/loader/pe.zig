@@ -1,20 +1,43 @@
-//! Minimal PE32+ (COFF) loader for RISC-V UEFI applications.
+//! Minimal PE32+ (COFF) loader for UEFI applications.
 //!
-//! Zig 0.16 cannot emit riscv64 PE, but it can read one: std.coff parses the
-//! headers and section table of a real EFI binary (e.g. Limine's
-//! BOOTRISCV64.EFI). We map the headers and sections to a fixed load base, apply
-//! base relocations, fence the I-cache, and return the entry point. The caller
-//! enters it in S-mode under a UEFI System Table, exactly like an EFI loader.
+//! Zig cannot emit a PE for every target Weir runs on, but it can read one:
+//! std.coff parses the headers and section table of a real EFI binary (e.g.
+//! Limine's BOOTRISCV64.EFI, or a BOOTAA64.EFI). We map the headers and sections
+//! to a fixed load base, apply base relocations, sync the instruction cache, and
+//! return the entry point. The caller enters it under a UEFI System Table,
+//! exactly like an EFI loader.
+//!
+//! The only architecture-dependent parts are which machine the image must
+//! declare and which cache maintenance makes the loaded code fetchable, so the
+//! loader builds for every port that has an arch layer.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const coff = std.coff;
 const mem = @import("../mem.zig");
+const arch = @import("../arch.zig");
+
+/// The PE machine this firmware can run: the one its own core implements. An
+/// EFI image for another machine is a real error, not a header quirk.
+pub const machine: coff.IMAGE.FILE.MACHINE = switch (builtin.cpu.arch) {
+    .riscv64 => .RISCV64,
+    .aarch64 => .ARM64,
+    else => @compileError("no PE machine for this target"),
+};
+
+/// The name UEFI reserves for a removable-media boot image of this machine.
+/// What a bootable ESP that names no boot option is expected to hold.
+pub const boot_file_name: []const u8 = switch (machine) {
+    .RISCV64 => "\\EFI\\BOOT\\BOOTRISCV64.EFI",
+    .ARM64 => "\\EFI\\BOOT\\BOOTAA64.EFI",
+    else => unreachable,
+};
 
 pub const Error = error{
     BadPe,
     NotImage,
     NotPe32Plus,
-    NotRiscv64,
+    WrongMachine,
 };
 
 /// A loaded PE image: where it landed and how big its in-memory footprint is.
@@ -41,7 +64,7 @@ pub fn load(image: []const u8) Error!Loaded {
 pub fn sizeOf(image: []const u8) Error!usize {
     var pe = coff.Coff.init(image, false) catch return error.BadPe;
     if (!pe.is_image) return error.NotImage;
-    if (pe.getHeader().machine != .RISCV64) return error.NotRiscv64;
+    if (pe.getHeader().machine != machine) return error.WrongMachine;
     if (@intFromEnum(pe.getOptionalHeader().magic) != coff.IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
         return error.NotPe32Plus;
     }
@@ -55,7 +78,7 @@ pub fn loadAt(image: []const u8, load_base: usize, max_image: usize) Error!Loade
     var pe = coff.Coff.init(image, false) catch return error.BadPe;
     if (!pe.is_image) return error.NotImage;
 
-    if (pe.getHeader().machine != .RISCV64) return error.NotRiscv64;
+    if (pe.getHeader().machine != machine) return error.WrongMachine;
     if (@intFromEnum(pe.getOptionalHeader().magic) != coff.IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
         return error.NotPe32Plus;
     }
@@ -138,7 +161,7 @@ pub fn loadAt(image: []const u8, load_base: usize, max_image: usize) Error!Loade
     relocate(&pe, dst, want_base, load_base, size_of_image);
 
     // We just wrote executable code. Make the fetch path observe it.
-    asm volatile ("fence.i" ::: .{ .memory = true });
+    arch.cpu.syncInstructionCache();
 
     return .{ .entry = load_base + entry_rva, .base = load_base, .size = size_of_image };
 }
@@ -189,7 +212,7 @@ fn relocate(
                     p.* = @bitCast(@as(i32, @bitCast(p.*)) +% @as(i32, @truncate(delta)));
                 },
                 // ABSOLUTE entries are padding. Other types do not occur:
-                // riscv64 EFI images relocate through DIR64 only.
+                // 64-bit EFI images relocate through DIR64 only.
                 else => {},
             }
         }

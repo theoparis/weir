@@ -4,6 +4,7 @@
 
 const conduit = @import("conduit");
 const platform = @import("../../platform.zig");
+const soc = @import("soc");
 
 fn dev() conduit.driver.clint.Clint {
     return conduit.driver.clint.bind(conduit.Mmio.direct(platform.clintBase()));
@@ -18,6 +19,19 @@ pub var sstc: bool = false;
 /// Current value of the global timer.
 pub fn time() u64 {
     return dev().time();
+}
+
+/// The monotonic counter, in `frequency` ticks per second. This is the name the
+/// shared arch face (`src/arch.zig`) calls; RISC-V code that knows it is talking
+/// to the CLINT keeps using `time`.
+pub fn now() u64 {
+    return time();
+}
+
+/// Ticks per second of the machine timer. The RISC-V counter's rate is a
+/// platform property, so this comes from the SoC description, not the device.
+pub fn frequency() u64 {
+    return soc.timebase_hz;
 }
 
 /// Program the machine timer compare for `hart`. A machine timer interrupt

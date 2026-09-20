@@ -34,7 +34,9 @@ const GLOBAL_GUID = [16]u8{
     0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c,
 };
 
-const FALLBACK_PATH = "\\EFI\\BOOT\\BOOTRISCV64.EFI";
+/// The removable-media path for this machine, from the loader: RISC-V firmware
+/// holds BOOTRISCV64.EFI, AArch64 firmware holds BOOTAA64.EFI.
+const FALLBACK_PATH = pe.boot_file_name;
 
 // loadBootImage() sets dev before findEsp reads it. block.Device is a vtable, so
 // zero-init would leave null function pointers.
