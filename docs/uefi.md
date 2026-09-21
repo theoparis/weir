@@ -41,6 +41,11 @@ Weir implements the memory, protocol, and hand-off calls a loader needs:
 - `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL` and `EFI_SIMPLE_TEXT_INPUT_PROTOCOL` over the
   console UART.
 - `RISCV_EFI_BOOT_PROTOCOL`, which reports the boot hart ID.
+- `EFI_GRAPHICS_OUTPUT_PROTOCOL`, over QEMU's ramfb device: one 1280x800 mode,
+  with the framebuffer in firmware-owned RAM and its address handed to the device
+  through fw_cfg. A machine with no fw_cfg, or one started without `-device
+  ramfb`, publishes no GOP at all, so an app that finds one has one that scans
+  out. See `src/uefi/gop.zig`.
 
 ## Configuration tables
 
@@ -57,6 +62,10 @@ removable-media fallback `\EFI\BOOT\BOOTRISCV64.EFI`.
 ## Not yet implemented
 
 These are on the way to a full implementation, not out of scope. Weir does not
-yet provide a Graphics Output Protocol, an RNG protocol, event or timer services,
-`LoadImage` and `StartImage`, Secure Boot, or a network stack. Their table
-entries return `EFI_UNSUPPORTED` until Weir fills them in.
+yet provide an RNG protocol, Secure Boot, or a network stack. Their table entries
+return `EFI_UNSUPPORTED` until Weir fills them in.
+
+Weir publishes a GOP but does not draw with it: there is no console on the
+framebuffer, and `Blt` answers `EFI_UNSUPPORTED`, so an app draws into
+`Mode->FrameBufferBase` itself, which is what a boot loader with its own
+framebuffer text does.

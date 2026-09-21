@@ -1,10 +1,11 @@
 # Weir
 
-Weir is UEFI firmware for RISC-V. It runs in M-mode, provides an SBI to the
-supervisor, publishes ACPI and SMBIOS tables, and boots an EFI application or
-the Linux EFI stub.
+Weir is UEFI firmware for RISC-V and AArch64. It runs in M-mode on RISC-V,
+provides an SBI to the supervisor, publishes ACPI and SMBIOS tables, and boots an
+EFI application or the Linux EFI stub.
 
-Weir targets both QEMU's `virt` machine and Lilith Semiconductor's River SoC on an FPGA. It
+Weir targets both QEMU's `virt` machine and Lilith Semiconductor's River SoC on an FPGA, and
+QEMU's aarch64 `virt` machine on ARM. It
 reads its hardware addresses from a device tree at build time, so one source
 tree serves several boards.
 

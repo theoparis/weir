@@ -230,6 +230,18 @@ pub fn build(b: *std.Build) void {
     if (dtb_path) |p| soc_test_mod.addAnonymousImport("soc_dtb", .{ .root_source_file = p });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = soc_test_mod })).step);
 
+    // src/acpi/arm64.zig lays out the AArch64 tables an OS reads off the wire
+    // (the MADT's GIC records, the GTDT, the SPCR). Host-built against a host
+    // conduit, its tests pin those bytes the way src/acpi/madt.zig's pin the
+    // RISC-V ones.
+    const arm_acpi_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/acpi/arm64.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    arm_acpi_test_mod.addImport("conduit", conduit_host);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = arm_acpi_test_mod })).step);
+
     // `zig build qemu` boots the firmware under QEMU's virt machine.
     const run = b.addSystemCommand(&.{
         "qemu-system-riscv64",

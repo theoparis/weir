@@ -173,3 +173,116 @@ pub fn spcrBody(buf: *[spcrBodyLen]u8, uart: u64, gsi: u32, interface: u8) []con
     std.mem.writeInt(u16, buf[30..32], 0xFFFF, .little);
     return buf;
 }
+
+// --- Tests ------------------------------------------------------------------
+//
+// The bodies are what an OS reads off the wire, so the tests pin the layouts:
+// a field written at the wrong offset, or a record of the wrong length, reads
+// back wrong here rather than in the OS. The host builds this file with a host
+// conduit, the way it builds src/acpi/madt.zig.
+
+const testing = std.testing;
+
+test "GTDT: the architectured timer list, at the offsets an OS reads" {
+    var buf: [gtdtBodyLen]u8 = undefined;
+    const body = gtdtBody(&buf, .{ 29, 30, 27, 26 });
+    try testing.expectEqual(gtdtBodyLen, body.len);
+
+    // No memory-mapped counter control base: the counter is system registers.
+    try testing.expectEqual(@as(u64, std.math.maxInt(u64)), std.mem.readInt(u64, body[0..8], .little));
+    // No secure EL1 timer: the firmware runs no EL3, so the entry is zero even
+    // though the tree names one.
+    try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, body[12..16], .little));
+    // Non-secure EL1, with the level/active-high/always-on flags.
+    try testing.expectEqual(@as(u32, 30), std.mem.readInt(u32, body[20..24], .little));
+    try testing.expectEqual(@as(u32, timer_flags), std.mem.readInt(u32, body[24..28], .little));
+    // Virtual EL1 and non-secure EL2, from the same tree node.
+    try testing.expectEqual(@as(u32, 27), std.mem.readInt(u32, body[28..32], .little));
+    try testing.expectEqual(@as(u32, 26), std.mem.readInt(u32, body[36..40], .little));
+    // No virtual EL2 timer (the OS gets no EL2), and no platform timers.
+    try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, body[44..48], .little));
+    try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, body[52..56], .little));
+    try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, body[56..60], .little));
+
+    // And through the accessors an OS uses, on a complete table.
+    var table: [36 + gtdtBodyLen]u8 = [_]u8{0} ** (36 + gtdtBodyLen);
+    @memcpy(table[0..4], "GTDT");
+    std.mem.writeInt(u32, table[4..8], table.len, .little);
+    @memcpy(table[36..], body);
+    const parsed = try almanac.tables.Gtdt.fromBytes(&table);
+    try testing.expectEqual(@as(u32, 30), parsed.nonSecureEl1Gsiv());
+    try testing.expectEqual(@as(u32, 27), parsed.virtualEl1Gsiv());
+}
+
+test "SPCR: a memory-mapped console that interrupts through the GIC" {
+    var buf: [spcrBodyLen]u8 = undefined;
+    const body = spcrBody(&buf, 0x0900_0000, 33, interface_pl011);
+    try testing.expectEqual(spcrBodyLen, body.len);
+
+    try testing.expectEqual(interface_pl011, body[0]);
+    // The GAS: a 32-bit register window in system memory, read a dword at a time.
+    try testing.expectEqual(@as(u8, 0), body[4]); // system memory
+    try testing.expectEqual(@as(u8, 32), body[5]); // register bit width
+    try testing.expectEqual(@as(u8, 3), body[7]); // dword access
+    try testing.expectEqual(@as(u64, 0x0900_0000), std.mem.readInt(u64, body[8..16], .little));
+    try testing.expectEqual(interrupt_gic, body[16]);
+    try testing.expectEqual(@as(u32, 33), std.mem.readInt(u32, body[18..22], .little));
+    try testing.expectEqual(baud_115200, body[22]);
+    try testing.expectEqual(@as(u8, 1), body[24]); // one stop bit
+    try testing.expectEqual(@as(u16, 0xFFFF), std.mem.readInt(u16, body[28..30], .little));
+    try testing.expectEqual(@as(u16, 0xFFFF), std.mem.readInt(u16, body[30..32], .little));
+
+    var table: [36 + spcrBodyLen]u8 = [_]u8{0} ** (36 + spcrBodyLen);
+    @memcpy(table[0..4], "SPCR");
+    std.mem.writeInt(u32, table[4..8], table.len, .little);
+    @memcpy(table[36..], body);
+    const parsed = try almanac.tables.Spcr.fromBytes(&table);
+    try testing.expectEqual(almanac.tables.spcr.InterfaceType.arm_pl011, parsed.interfaceType());
+    try testing.expectEqual(@as(u64, 0x0900_0000), parsed.baseAddress().address);
+    try testing.expectEqual(@as(u32, 33), parsed.globalSystemInterrupt());
+}
+
+test "MADT: one distributor and a CPU interface per core" {
+    const mpidrs = [_]u64{ 0x0, 0x1 };
+    var buf: [madtBodyLen(mpidrs.len)]u8 = undefined;
+    const body = madtBody(&buf, &mpidrs, 0x0800_0000, 0x0801_0000);
+    try testing.expectEqual(madtBodyLen(mpidrs.len), body.len);
+    // The fixed part is zero: AArch64 has no local APIC and no PCAT flag.
+    try testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, body[0..8], .little));
+    // The distributor, first, as an OS walks the records in order.
+    try testing.expectEqual(@as(u8, 0x0c), body[8]);
+    try testing.expectEqual(@as(u8, @sizeOf(Gicd)), body[9]);
+    try testing.expectEqual(@as(u8, 2), body[8 + @offsetOf(Gicd, "gic_version")]);
+    try testing.expectEqual(
+        @as(u64, 0x0800_0000),
+        std.mem.readInt(u64, body[8 + @offsetOf(Gicd, "physical_base_address") ..][0..8], .little),
+    );
+    // Then a CPU interface per core, carrying the core's affinity.
+    const gicc = 8 + @sizeOf(Gicd);
+    try testing.expectEqual(@as(u8, 0x0b), body[gicc]);
+    try testing.expectEqual(@as(u8, @sizeOf(Gicc)), body[gicc + 1]);
+    for (mpidrs, 0..) |mpidr, i| {
+        const rec = gicc + i * @sizeOf(Gicc);
+        try testing.expectEqual(@as(u32, @intCast(i)), std.mem.readInt(u32, body[rec + 4 ..][0..4], .little));
+        try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, body[rec + 12 ..][0..4], .little));
+        try testing.expectEqual(@as(u64, 0x0801_0000), std.mem.readInt(u64, body[rec + 32 ..][0..8], .little));
+        try testing.expectEqual(mpidr, std.mem.readInt(u64, body[rec + 68 ..][0..8], .little));
+    }
+
+    // The iterator an OS uses finds both records, with those bases.
+    var table: [36 + madtBodyLen(mpidrs.len)]u8 = [_]u8{0} ** (36 + madtBodyLen(mpidrs.len));
+    @memcpy(table[0..4], "APIC");
+    std.mem.writeInt(u32, table[4..8], table.len, .little);
+    @memcpy(table[36..], body);
+    const parsed = try almanac.tables.Madt.fromBytes(&table);
+    var cores: usize = 0;
+    var dist: u64 = 0;
+    var it = parsed.iterator();
+    while (try it.next()) |entry| switch (entry) {
+        .gicd => |d| dist = d.physical_base_address,
+        .gicc => cores += 1,
+        else => {},
+    };
+    try testing.expectEqual(@as(u64, 0x0800_0000), dist);
+    try testing.expectEqual(mpidrs.len, cores);
+}

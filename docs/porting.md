@@ -23,8 +23,9 @@ matcher per class Weir needs:
 
 | Class | Purpose | Example `compatible` |
 | --- | --- | --- |
-| `uart` | console | `ns16550a`, `snps,dw-apb-uart` |
-| `timer` | CLINT / machine timer | `riscv,clint0` |
+| `uart` | console | `ns16550a`, `snps,dw-apb-uart`, `arm,pl011` |
+| `timer` | CLINT / machine timer, or the architectured timer | `riscv,clint0`, `arm,armv8-timer` |
+| `intc` | external interrupt controller | `riscv,plic0`, `arm,cortex-a15-gic` |
 | `memory` | main DRAM | `memory` |
 | `flash` | XIP boot flash | `jedec,spi-nor` |
 | `sdram` | DDR controller (for the FSBL) | `harbor,sdram-controller` |
@@ -36,6 +37,33 @@ matcher per class Weir needs:
 A device is optional. When the tree has no node for a class, Weir uses a default
 or turns the feature off. The console UART, the CLINT, and the memory node are
 the minimum a board needs.
+
+## AArch64
+
+An AArch64 board is a port of the same kind. It supplies a device tree, and the
+same `src/soc.zig` reads it: the console, the GIC, the architectured timer and
+the RAM windows all come from the tree, and no part of the platform layer has an
+address of its own. What differs is the arch layer behind `src/arch.zig`
+(`src/arch/arm64`): the bring-up drops from EL2 to EL1 and enables an MMU with
+its own tables, PSCI starts the secondary cores, and the GIC and the system
+counter replace the PLIC and the CLINT.
+
+Two facts a tree has to get right, because the firmware passes them on rather
+than inventing them:
+
+- **The timer's interrupts.** The timer node lists the four architectured timers
+  in order (secure EL1, non-secure EL1, virtual EL1, non-secure EL2). The
+  firmware runs on the non-secure EL1 timer, and it is that entry — not a
+  constant — that its own interrupt setup uses and that the ACPI GTDT publishes.
+  A tree that lists them out of order gives the OS a timer the firmware is not
+  running on.
+- **The interrupt controller's two windows.** A GICv2 node's `reg` holds the
+  distributor first and the CPU interface second. The firmware binds the CPU
+  interface, and the ACPI MADT describes both.
+
+The build takes the tree with `-Ddtb`, and `tools/arm64-virt.dtb` is QEMU's
+aarch64 `virt` machine dumped for the default. The ACPI tables an AArch64 board
+publishes differ from the RISC-V set; see [acpi.md](acpi.md).
 
 ## The linker script follows the tree
 

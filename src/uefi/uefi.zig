@@ -14,6 +14,7 @@ const arch = @import("../arch.zig");
 const events = @import("events.zig");
 const varstore = @import("varstore.zig");
 const handledb = @import("handledb.zig");
+const gop = @import("gop.zig");
 const blockio = @import("blockio.zig");
 const initrd = @import("initrd.zig");
 const pe = @import("../loader/pe.zig");
@@ -1471,6 +1472,16 @@ pub fn prepare(
     } else if (n_bio > 0) {
         loaded_image.device_handle = @ptrCast(bio_hs[0]);
     }
+
+    // A boot loader publishes a GOP because it is where an OS's graphics stack
+    // starts: the kernel's early console, the boot splash, and the framebuffer
+    // handover all begin with the address and geometry this protocol carries,
+    // and nothing earlier than the loader has one to describe. It is also the
+    // last moment to program the display device: after ExitBootServices there is
+    // no boot service left to configure one with. The install is skipped
+    // entirely on a machine with no ramfb, so a board with no displayable
+    // framebuffer sees no protocol rather than one that scans out nothing.
+    gop.install();
 
     return @intFromPtr(&system_table);
 }

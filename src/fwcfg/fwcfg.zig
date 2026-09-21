@@ -1,7 +1,10 @@
 //! QEMU fw_cfg over MMIO. Used to pull QEMU's generated ACPI tables
 //! (etc/acpi/tables, etc/acpi/rsdp, etc/table-loader), as EDK2/OVMF does, and
-//! republish them to the OS. Only the byte-stream (non-DMA) read path is
-//! implemented. The ACPI blobs are small, so throughput does not matter.
+//! republish them to the OS, and to configure the ramfb display device.
+//!
+//! Reads use the byte-stream (non-DMA) path: the ACPI blobs are small, so
+//! throughput does not matter. Writes use the DMA channel, which is the only one
+//! QEMU still implements — see `write`.
 
 const std = @import("std");
 
@@ -13,6 +16,34 @@ const std = @import("std");
 var base_v: usize = 0;
 const REG_DATA: usize = 0x00; // selected item streams out a byte at a time
 const REG_SELECTOR: usize = 0x08; // 16-bit, big-endian
+const REG_DMA: usize = 0x10; // 64-bit, big-endian: address of a DMA access descriptor
+
+// The DMA channel, the only write path QEMU has left: `fw_cfg_write()` (the
+// data-register write) has been an empty function since QEMU v2.4, so a guest
+// cannot write a file by selecting it and pushing bytes out of the data
+// register. Instead the guest lays a descriptor in RAM — the control word
+// carries the selector in its top half plus the SELECT and WRITE bits, then the
+// transfer length, then the payload's guest-physical address — and writes the
+// descriptor's address to the DMA register. That store runs the entire transfer
+// inside QEMU's MMIO handler.
+const DMA_CTL_ERROR: u32 = 0x01;
+const DMA_CTL_SELECT: u32 = 0x08;
+const DMA_CTL_WRITE: u32 = 0x10;
+
+/// One DMA access descriptor, exactly as the device reads it (FWCfgDmaAccess).
+/// All three fields are big-endian; the fields sum to 16 bytes, so this layout
+/// carries no padding on either side.
+const DmaAccess = extern struct {
+    control: u32,
+    length: u32,
+    address: u64,
+};
+
+/// The descriptor handed to the device, filled in by `write`. A fixed buffer
+/// rather than a stack local, like the rest of this firmware's device-facing
+/// state: the device reads these 16 bytes out of RAM by address, so the honest
+/// shape is a buffer that outlives one call.
+var dma_access: DmaAccess = undefined; // zippy:ignore unsafe_undefined
 
 const SELECTOR_SIGNATURE: u16 = 0x0000; // reads "QEMU"
 const SELECTOR_FILE_DIR: u16 = 0x0019;
@@ -29,6 +60,10 @@ fn selectorReg() *volatile u16 {
 
 fn dataReg() *volatile u8 {
     return @ptrFromInt(base_v + REG_DATA);
+}
+
+fn dmaReg() *volatile u64 {
+    return @ptrFromInt(base_v + REG_DMA);
 }
 
 /// Select an item. This also resets its read offset to zero.
@@ -93,4 +128,39 @@ pub fn find(name: []const u8) ?File {
 pub fn read(file: File, buf: []u8) void {
     select(file.selector);
     readBytes(buf[0..file.size]);
+}
+
+/// Write `data` to `file`. One transfer holds the whole file: the device fails a
+/// write whose length disagrees with the item's own length, so there is no
+/// chunked form of this that works.
+///
+/// This is how QEMU's ramfb device is told about a framebuffer (see
+/// uefi/gop.zig): `etc/ramfb` is a write-only file, and the guest hands the
+/// device the address it should scan out — the direction of the exchange is the
+/// opposite of every other fw_cfg file, which the guest reads.
+///
+/// The payload address in the descriptor is guest-physical, not the virtual one
+/// the caller's pointer names: QEMU walks the system address space with it. Weir
+/// identity-maps RAM on both architectures, so the two are the same number here,
+/// and the pointer goes in unchanged.
+///
+/// Returns false when the device reports an error — a descriptor it could not
+/// read, a length that disagrees with the item size, or an item it did not
+/// register as writable. The transfer runs synchronously inside the store to the
+/// DMA register, so the control word is already written back when that store
+/// retires and one read reports the outcome.
+pub fn write(file: File, data: []const u8) bool {
+    // Volatile stores: the device reads this out of memory while the store to
+    // the DMA register below is in flight, so every field has to be in RAM
+    // before that store, not merely live in registers.
+    const desc: *volatile DmaAccess = &dma_access;
+    desc.* = .{
+        .control = @byteSwap(DMA_CTL_SELECT | DMA_CTL_WRITE | (@as(u32, file.selector) << 16)),
+        .length = @byteSwap(@as(u32, @intCast(data.len))),
+        .address = @byteSwap(@as(u64, @intFromPtr(data.ptr))),
+    };
+    dmaReg().* = @byteSwap(@as(u64, @intFromPtr(&dma_access)));
+    // The control word is the device's, not ours: read it back volatile.
+    const ctl: *volatile u32 = @ptrCast(&dma_access.control);
+    return (@byteSwap(ctl.*) & DMA_CTL_ERROR) == 0;
 }

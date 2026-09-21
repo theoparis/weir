@@ -48,8 +48,38 @@ probes the PLIC.
 The CLINT has no ACPI interrupt binding on purpose. Weir owns it in M-mode and
 gives the OS its timer through SBI.
 
-The DSDT is the raw AML blob the board supplies with `-Daml`. Weir references it
-in place. It does not generate AML.
+The DSDT comes from one of two places. A board may supply a raw AML blob with
+`-Daml`, and Weir references it in place. With no AML, Weir translates the
+device tree into one: every matched node becomes a device with its `reg` and
+`interrupts` as `_CRS`, under a native HID where one exists (the interrupt
+controller, the console UART) and under `PRP0001` with the node's `compatible`
+in `_DSD` where none does, which is the device-tree bridge an OS already knows
+how to bind.
+
+## AArch64
+
+An AArch64 board builds its table set from the same two sources, with different
+tables, because an ACPI OS reads none of a device tree's own nodes there:
+
+- MADT, whose GIC structures carry the CPUs and the interrupt controller. There
+  is one GICD record for the distributor and one GICC record per core. The core
+  entries take their MPIDR from the tree, which is what an OS matches a CPU
+  against.
+- GTDT, the architectured timer: the counter control base (none, the counter is
+  programmed through the system registers) and the timer interrupt list. The
+  GSIVs come from the timer node's `interrupts`, which names the four timers in
+  architectured order (secure EL1, non-secure EL1, virtual EL1, non-secure EL2).
+  The secure and virtual-EL2 entries stay zero: this firmware runs no EL3 for
+  the OS to reach, and gives it no EL2.
+- SPCR, the console. An AArch64 SPCR describes the console's GSI and its
+  register map family — a PL011 and a 16550 are not the same device — where the
+  RISC-V one describes a polled 16550.
+
+The DSDT differs too. A GIC has no ACPI HID an OS could bind: the OS takes it
+from the MADT, so Weir leaves the interrupt controller out of the DSDT entirely
+rather than give it a RISC-V HID that would mislabel it. The console UART keeps
+a device, under the HID its driver matches: `ARMH0011` for a PL011, `PNP0501`
+for a 16550.
 
 ## TPM
 
