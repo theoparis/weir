@@ -28,7 +28,10 @@ const tpm = @import("tpm/tpm.zig");
 const uefi = @import("uefi/uefi.zig");
 const pe = @import("loader/pe.zig");
 const acpi_qemu = @import("acpi/qemu.zig");
+const acpi = @import("acpi/acpi.zig");
+const config = @import("config.zig");
 const manager = @import("boot/manager.zig");
+const mpservices = @import("uefi/mpservices.zig");
 const psci = @import("arch/arm64/psci.zig");
 const cpu = @import("arch/arm64/cpu.zig");
 const el = @import("arch/arm64/mode.zig");
@@ -183,18 +186,26 @@ export fn arm64Main() callconv(.c) noreturn {
 
     // The machine's own ACPI tables, if the platform hands them over. QEMU's
     // aarch64 virt machine publishes them through fw-cfg exactly as its RISC-V
-    // machine does, so the firmware gives the OS a real ACPI set on both.
+    // machine does, so the firmware gives the OS a real ACPI set on both. With
+    // nothing handed over, build the AArch64 table set from the device tree this
+    // image was built with, the way the RISC-V firmware builds its own.
     if (acpi_qemu.loadTables()) |rsdp| {
         console.out.print("[acpi] using QEMU fw_cfg tables, RSDP @ {x}\n", .{rsdp}) catch {};
+    } else if (config.aml != null or config.dtb != null) {
+        acpi.setupArm(config.aml);
+    } else {
+        console.out.writeAll("[acpi] no AML and no device tree. The OS uses the published device tree.\n") catch {};
     }
 
     // Boot media, through the same block, filesystem, loader, and boot-manager
     // stack the RISC-V firmware uses: virtio-mmio transports from the tree, GPT,
     // FAT, and a PE image. Interrupts are still masked here, so nothing else
-    // writes to the console while the walk reports.
+    // writes to the console while the walk reports. A machine with no disk boots
+    // the PE application embedded with -Dpe-app, the way the RISC-V firmware
+    // falls back to it.
     varstore.init();
     tpm.init();
-    const booted: ?pe.Loaded = manager.loadBootImage();
+    const booted: ?pe.Loaded = manager.loadBootImage() orelse loadEmbeddedApp();
 
     // The interrupt controller and the timer, before the application runs: a
     // UEFI application may use both, and the firmware's timer services and
@@ -220,7 +231,8 @@ export fn arm64Main() callconv(.c) noreturn {
         // The UEFI environment: boot and runtime services, the handles the boot
         // manager published, and the tables the OS reads. Its device handle is
         // the ESP, so the application can open its own files.
-        const table = uefi.prepare(bootDtb(), 0, loaded.base, loaded.size);
+        const table = uefi.prepare(bootDtb(), 0, loaded.base, loaded.size, config.cmdline);
+        publishApServices();
         console.out.print(
             "[uefi] PE entry @ {x} (base {x}, {d} bytes), system table @ {x}\n",
             .{ loaded.entry, loaded.base, loaded.size, table },
@@ -253,6 +265,34 @@ export fn arm64Main() callconv(.c) noreturn {
     while (true) contextCheck();
 }
 
+/// The PE application embedded with -Dpe-app, if this build has one. It is
+/// loaded the same way the boot manager loads an image off a disk: the loader
+/// applies the sections and relocations, and the UEFI environment below is built
+/// around the result. A build with no embedded application, and no disk, has
+/// nothing to boot.
+fn loadEmbeddedApp() ?pe.Loaded {
+    const image = config.pe_app orelse return null;
+    console.out.print("[uefi] loading PE/COFF EFI application, {d} bytes\n", .{image.len}) catch {};
+    tpm.measure(tpm.PCR_BOOT_LOADER, image, "boot loader");
+    return pe.load(image) catch |err| {
+        console.err.print("[uefi] PE load failed: {s}\n", .{@errorName(err)}) catch {};
+        return null;
+    };
+}
+
+/// Publish the application processors to the UEFI environment, so an application
+/// can count them and run procedures on them. Each one's affinity value goes with
+/// it: that is how a procedure can tell which core it is running on.
+///
+/// This happens after `uefi.prepare`, because the protocol is installed into the
+/// handle database the environment owns, and before the application is entered,
+/// because that is the only moment an application could ask for it.
+fn publishApServices() void {
+    if (secondaries_started == 0) return;
+    for (0..secondaries_started) |i| mpservices.setApAffinity(i, soc.harts[i + 1]);
+    mpservices.install(secondaries_started);
+}
+
 /// The tree to publish to the OS: the one this machine booted with when a
 /// monitor or bootloader passed it, the build's own otherwise. The build-time
 /// tree is what discovery used, so it always describes a machine the firmware
@@ -279,11 +319,12 @@ fn imageReturned(status: usize) callconv(.c) noreturn {
 
 // --- Secondary cores --------------------------------------------------------
 
-/// Stacks for the cores PSCI starts, one 16 KiB slot each, at the bottom of
+/// Stacks for the cores PSCI starts, one 32 KiB slot each, at the bottom of
 /// .bss. The boot core keeps the stack the linker script placed at the top of
-/// RAM; these are for the cores that arrive later and need somewhere to run
-/// before they have anything else.
-const secondary_stack_size = 16 * 1024;
+/// RAM; these are for the cores that arrive later, and they have to carry an MP
+/// Services procedure the firmware cannot size: an application's procedure runs
+/// on one of these.
+const secondary_stack_size = 32 * 1024;
 const max_secondaries = 7;
 var secondary_stacks: [max_secondaries][secondary_stack_size]u8 align(16) =
     [_][secondary_stack_size]u8{[_]u8{0} ** secondary_stack_size} ** max_secondaries;
@@ -385,9 +426,10 @@ export fn secondaryMain(stack_top: usize) callconv(.c) noreturn {
     @atomicStore(bool, &secondary_up[index], true, .release);
     _ = @atomicRmw(u32, &secondaries_online, .Add, 1, .acq_rel);
 
-    // Parked. A core has no work until the OS starts it: the firmware's own use
-    // of secondaries is the MP services protocol, which comes later.
-    while (true) cpu.wfe();
+    // The holding loop: the core now waits for an MP Services assignment. This
+    // is what makes the second core useful to the environment above rather than
+    // merely present.
+    mpservices.apLoop(index);
 }
 
 /// The buffer the loop rewrites and copies, and the tally the tick handler

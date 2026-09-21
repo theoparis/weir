@@ -59,7 +59,18 @@ var end_path: uefi.protocol.DevicePath = undefined; // zippy:ignore unsafe_undef
 var riscv_boot: RiscvBootProtocol = undefined; // zippy:ignore unsafe_undefined
 var boot_hartid: usize = 0;
 var dtb_addr: usize = 0;
-var cmdline = std.unicode.utf8ToUtf16LeStringLiteral("earlycon=sbi console=ttyS0 keep_bootcon").*;
+
+/// The initial image's command line, UTF-16, as LoadedImage.load_options carries
+/// it. prepare() fills it from the build's `-Dcmdline`.
+var cmdline_buf: [512]u16 = undefined; // zippy:ignore unsafe_undefined
+var cmdline_len: usize = 0;
+
+/// Encode the command line for the protocol. The build sets it as UTF-8; an EFI
+/// application is handed UTF-16, NUL-terminated.
+fn setCmdline(utf8: []const u8) void {
+    cmdline_len = std.unicode.utf8ToUtf16Le(cmdline_buf[0 .. cmdline_buf.len - 1], utf8) catch 0;
+    cmdline_buf[cmdline_len] = 0;
+}
 
 // Device tree handed to the OS via the EFI configuration table.
 const DEVICE_TREE_GUID = uefi.Guid{
@@ -1230,7 +1241,14 @@ fn addProtocol(handle: ?*handledb.Handle, guid: *const uefi.Guid, iface: *anyopa
 /// Build the EFI System Table and return its address (passed to the app in a1).
 /// `dtb`/`hartid` are published to the OS (config table + RISC-V boot protocol).
 /// `image_base`/`image_size` describe the loaded app for LoadedImage.
-pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) usize {
+pub fn prepare(
+    dtb: usize,
+    hartid: usize,
+    image_base: usize,
+    image_size: usize,
+    cmdline: []const u8,
+) usize {
+    setCmdline(cmdline);
     dtb_addr = dtb;
     boot_hartid = hartid;
     image_handle = handledb.create();
@@ -1356,8 +1374,8 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
         .device_handle = imageHandle(),
         .file_path = &end_path,
         .reserved = @ptrCast(&image_marker),
-        .load_options_size = @intCast((cmdline.len + 1) * 2),
-        .load_options = @ptrCast(&cmdline),
+        .load_options_size = @intCast((cmdline_len + 1) * 2),
+        .load_options = @ptrCast(&cmdline_buf),
         .image_base = @ptrFromInt(image_base),
         .image_size = image_size,
         .image_code_type = .loader_code,

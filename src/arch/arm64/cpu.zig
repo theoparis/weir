@@ -14,6 +14,13 @@ pub inline fn wfe() void {
     asm volatile ("wfe");
 }
 
+/// Idle until something happens. The arch-neutral name for the idle hint, so a
+/// loop that waits for work — an application processor's holding loop — does not
+/// have to know which architecture it is on.
+pub inline fn idle() void {
+    wfe();
+}
+
 /// Park the core forever. This is the single stop-here sink, as in the RISC-V
 /// port: panics, unhandled traps, and an exhausted boot all converge here.
 pub fn halt() noreturn {

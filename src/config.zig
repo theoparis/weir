@@ -24,5 +24,16 @@ pub const disk_boot: bool = options.disk_boot;
 /// When true, boot via the ESP boot manager (GPT + FAT + BootOrder/fallback).
 pub const boot_manager: bool = options.boot_manager;
 
+/// Kernel command line / application options, handed to the initial image as its
+/// UEFI load options. Set with `-Dcmdline="..."`; a Linux EFI stub reads it as
+/// its kernel command line, and an EFI application as its own options (`--el2`
+/// for q1n1, say). The default suits the platform's console.
+pub const cmdline: []const u8 = if (options.has_cmdline) options.cmdline else default_cmdline;
+
+const default_cmdline: []const u8 = if (@import("builtin").cpu.arch == .riscv64)
+    "earlycon=sbi console=ttyS0 keep_bootcon"
+else
+    "";
+
 /// Initramfs to serve the Linux kernel via LoadFile2, or null.
 pub const initrd: ?[]const u8 = if (options.has_initrd) @embedFile("weir_initrd")[0..] else null;

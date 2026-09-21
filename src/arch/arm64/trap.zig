@@ -8,13 +8,19 @@
 //! never silent.
 
 const console = @import("../../console/console.zig");
+const soc = @import("soc");
 const cpu = @import("cpu.zig");
 const sysreg = @import("sysreg.zig");
 
-/// The interrupt the bring-up runs on: PPI 30, the EL1 physical timer. A PPI is
-/// private to the core, so the GIC routes it by the redistributor rather than
-/// through the distributor's shared lines.
-pub const timer_irq: u32 = 30;
+/// The interrupt the bring-up runs on: the EL1 physical timer, the second of the
+/// four the timer node names (secure EL1, non-secure EL1, virtual, non-secure
+/// EL2). A PPI is private to the core, so the GIC routes it to that core rather
+/// than through the distributor's shared lines.
+///
+/// The board's device tree is the authority — the same number goes into the ACPI
+/// GTDT, so the OS arms the timer the firmware ran on — and PPI 30 is the
+/// convention this falls back to when the tree does not name one.
+pub const timer_irq: u32 = if (soc.timer_gsivs[1] != 0) soc.timer_gsivs[1] else 30;
 
 /// Install the vector table as the EL1 exception base.
 pub fn install() void {

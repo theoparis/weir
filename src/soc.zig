@@ -6,6 +6,7 @@
 //! back to the common addresses.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const conduit = @import("conduit");
 const has_dt = @import("build_options").has_dtb;
 
@@ -17,7 +18,11 @@ const matchers = [_]conduit.Matcher{
     // aarch64 virt, most ARM SoCs). console.zig binds the driver the matched id
     // selects: the two register maps are not compatible.
     .{ .class = .uart, .dt_compatible = &.{ "ns16550a", "ns16550", "snps,dw-apb-uart", "arm,pl011" } },
-    .{ .class = .timer, .dt_compatible = &.{ "riscv,clint0", "sifive,clint0" } },
+    // The timer: a RISC-V CLINT, or the AArch64 architectured timer. The two
+    // differ in kind — a CLINT is a register window the firmware programs, the
+    // architectured timer is system registers plus four GIC interrupts, and the
+    // node's `interrupts` are what the ACPI GTDT publishes.
+    .{ .class = .timer, .dt_compatible = &.{ "riscv,clint0", "sifive,clint0", "arm,armv8-timer" } },
     // The /memory node has no compatible property. conduit exposes its device_type.
     .{ .class = .memory, .dt_compatible = &.{"memory"} },
     // SPI-NOR as on River, or the parallel NOR (cfi-flash) QEMU's aarch64 virt
@@ -110,6 +115,13 @@ fn firstMatchIndex(class: conduit.Class, ids: []const []const u8) ?usize {
     return null;
 }
 
+/// The baked match for a class, if the tree has one.
+fn firstOfClass(class: conduit.Class) ?usize {
+    @setEvalBranchQuota(4_000_000);
+    for (devices, 0..) |*m, i| if (m.class == class) return i;
+    return null;
+}
+
 /// Base of the `n`th MMIO window of the baked device at `match_index`. 0 when
 /// the device has no such window.
 fn mmioBaseAt(match_index: usize, n: usize) usize {
@@ -133,6 +145,31 @@ pub const uart_clock: usize = if (firstClockHz(.uart)) |hz| @intCast(hz) else 24
 /// offsets on the other part.
 pub const uart_is_pl011: bool = firstMatchIndex(.uart, &pl011_ids) != null;
 const pl011_ids = [_][]const u8{"arm,pl011"};
+
+/// The console UART's interrupt, as the GSI an OS binds. conduit already lowered
+/// the node's specifier into that number (a GIC's is offset into its type's
+/// range, a PLIC's is the source), so this is the node's first interrupt as it
+/// comes back from the tree.
+pub const uart_gsi: u32 = if (firstOfClass(.uart)) |i|
+    (if (devices[i].irq(0)) |q| q.number else 0)
+else
+    0;
+
+/// The architectured timer's four interrupts as GSIs, in the order the node
+/// names them: secure EL1, non-secure EL1, virtual, non-secure EL2. This is the
+/// ACPI GTDT's timer list. All zero on a board whose timer node declares none,
+/// and on a board with no architectured timer at all (a RISC-V CLINT, whose
+/// machine timer raises its interrupt by CSR rather than through the controller).
+pub const timer_gsivs: [4]u32 = blk: {
+    @setEvalBranchQuota(4_000_000);
+    const i = firstOfClass(.timer) orelse break :blk .{ 0, 0, 0, 0 };
+    var gsivs = [4]u32{ 0, 0, 0, 0 };
+    for (&gsivs, 0..) |*g, n| {
+        const q = devices[i].irq(n) orelse break;
+        g.* = q.number;
+    }
+    break :blk gsivs;
+};
 
 // The ARM generic interrupt controller. Its distributor and CPU interface are
 // two MMIO windows of one tree node, so both come off the same match. The

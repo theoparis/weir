@@ -92,6 +92,11 @@ pub fn build(b: *std.Build) void {
     // load through the PE/COFF loader instead of the ELF path.
     const pe_app_path = b.option(std.Build.LazyPath, "pe-app", "Path to a real PE32+ EFI application to embed and load via the PE/COFF loader");
 
+    // The initial image's command line, published as its UEFI load options. A
+    // Linux EFI stub reads it as the kernel command line; an EFI application
+    // reads it as its own options.
+    const cmdline = b.option([]const u8, "cmdline", "Command line handed to the initial image as its UEFI load options (e.g. --el2 for an EFI app)");
+
     // Read the EFI application off a disk at boot instead of from an
     // embedded blob.
     const disk_boot = b.option(bool, "disk-boot", "Load the boot PE as a bare image at sector 0 of any device-tree disk, instead of an embedded blob") orelse (payload_path == null);
@@ -112,6 +117,8 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "disk_boot", disk_boot);
     options.addOption(bool, "boot_manager", boot_manager);
     options.addOption(bool, "has_initrd", initrd_path != null);
+    options.addOption(bool, "has_cmdline", cmdline != null);
+    if (cmdline) |c| options.addOption([]const u8, "cmdline", c);
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -269,10 +276,17 @@ pub fn build(b: *std.Build) void {
         arm64_opts.addOption(bool, "has_dtb", true);
         arm64_opts.addOption(bool, "has_aml", false);
         arm64_opts.addOption(bool, "has_payload", false);
-        arm64_opts.addOption(bool, "has_pe_app", false);
+        arm64_opts.addOption(bool, "has_pe_app", pe_app_path != null);
         arm64_opts.addOption(bool, "disk_boot", false);
         arm64_opts.addOption(bool, "boot_manager", false);
         arm64_opts.addOption(bool, "has_initrd", false);
+        arm64_opts.addOption(bool, "has_cmdline", cmdline != null);
+        if (cmdline) |c| arm64_opts.addOption([]const u8, "cmdline", c);
+
+        // One options module for the whole ARM64 graph: the same option file
+        // reached through two names is two modules, and the same file may not
+        // belong to two modules.
+        const arm64_opts_mod = arm64_opts.createModule();
 
         const arm64_conduit = b.dependency("conduit", .{
             .target = arm64_target,
@@ -289,7 +303,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         arm64_soc.addImport("conduit", arm64_conduit);
-        arm64_soc.addImport("build_options", arm64_opts.createModule());
+        arm64_soc.addImport("build_options", arm64_opts_mod);
         arm64_soc.addAnonymousImport("soc_dtb", .{ .root_source_file = arm64_dtb });
 
         const arm64_mod = b.createModule(.{
@@ -299,6 +313,13 @@ pub fn build(b: *std.Build) void {
         });
         arm64_mod.addImport("conduit", arm64_conduit);
         arm64_mod.addImport("soc", arm64_soc);
+        // config.zig reads the build options (which image this is) and embeds the
+        // device tree, the same module the RISC-V image builds against.
+        arm64_mod.addImport("build_options", arm64_opts_mod);
+        arm64_mod.addAnonymousImport("weir_dtb", .{ .root_source_file = arm64_dtb });
+        // The same -Dpe-app the RISC-V image takes: a PE32+ EFI application the
+        // firmware loads when no disk offers one.
+        if (pe_app_path) |p| arm64_mod.addAnonymousImport("weir_pe_app", .{ .root_source_file = p });
 
         const aexe = b.addExecutable(.{
             .name = "weir-arm64",

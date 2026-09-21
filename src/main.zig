@@ -443,7 +443,7 @@ fn enterPe(image: []const u8, hartid: usize, dtb: usize) ?Handoff {
         console.err.print("[uefi] PE load failed: {s}\n", .{@errorName(err)}) catch {};
         return null;
     };
-    const table = uefi.prepare(stableDtb(dtb), hartid, loaded.base, loaded.size);
+    const table = uefi.prepare(stableDtb(dtb), hartid, loaded.base, loaded.size, config.cmdline);
     console.out.print(
         "[uefi] PE entry @ {x} (base {x}, {d} bytes), system table @ {x}\n",
         .{ loaded.entry, loaded.base, loaded.size, table },
@@ -515,7 +515,7 @@ pub fn handoff(hartid: usize, dtb: usize) Handoff {
             "[boot] boot manager: searching the ESP for a bootable EFI app\n",
         ) catch {};
         if (manager.loadBootImage()) |loaded| {
-            const table = uefi.prepare(stableDtb(dtb_eff), hartid, loaded.base, loaded.size);
+            const table = uefi.prepare(stableDtb(dtb_eff), hartid, loaded.base, loaded.size, config.cmdline);
             console.out.print(
                 "[uefi] PE entry @ {x} (base {x}, {d} bytes), system table @ {x}\n",
                 .{ loaded.entry, loaded.base, loaded.size, table },
