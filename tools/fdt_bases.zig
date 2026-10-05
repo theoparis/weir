@@ -74,7 +74,7 @@ pub fn parse(fdt: *const dtree.Reader, out: *Bases) void {
     // One entry per open node. stack[0] is the implicit root parent (holding the
     // DT default cells); sp indexes the current node. 24 levels is far more than
     // any real tree nests; deeper nodes reuse the deepest slot.
-    var stack = [_]Node{.{}} ** 24;
+    var stack: [24]Node = @splat(.{});
     var sp: usize = 0;
 
     while (iter.next() catch return) |node| {

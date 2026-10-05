@@ -2,7 +2,7 @@
   lib,
   stdenv,
   mkShell,
-  zig,
+  zig_0_17,
   qemu,
   flakever,
 }:
@@ -12,13 +12,13 @@ stdenv.mkDerivation (finalAttrs: {
 
   src = lib.cleanSource ../../.;
 
-  zigDeps = zig.fetchDeps {
+  zigDeps = zig_0_17.fetchDeps {
     inherit (finalAttrs) src pname version;
-    hash = "sha256-YY+Uyg3qUQ4Rdf68/Ur7FkDd6DIBEAJ0IlRKQazNFEk=";
+    hash = "sha256-lS//HnBMruyFPHLm6AsOViLbwhfV42ABIyF1yNZw8ls=";
   };
 
   nativeBuildInputs = [
-    zig
+    zig_0_17
   ];
 
   postConfigure = ''
@@ -29,7 +29,7 @@ stdenv.mkDerivation (finalAttrs: {
     name = "weir-dev-shell";
 
     packages = [
-      zig
+      zig_0_17
       qemu
     ];
   };

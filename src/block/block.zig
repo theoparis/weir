@@ -18,7 +18,7 @@ pub const Partition = struct {
     /// 1-based partition number and the GPT unique partition GUID, used to build
     /// the Hard Drive device path node so a bootloader can match its boot volume.
     number: u32 = 1,
-    signature: [16]u8 = .{0} ** 16,
+    signature: [16]u8 = @splat(0),
 
     pub fn blockSize(self: *const Partition) u32 {
         return self.dev.block_size;

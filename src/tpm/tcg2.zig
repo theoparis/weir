@@ -9,7 +9,7 @@ const tpm2 = @import("tpm2.zig");
 const handledb = @import("../uefi/handledb.zig");
 
 const Status = uefi.Status;
-const ok = @intFromEnum(Status.success);
+const ok = @backingInt(Status.success);
 
 // EFI_TCG2_PROTOCOL_GUID 607f766c-7455-42be-930b-e4d76db2720f.
 pub const TCG2_GUID = uefi.Guid{
@@ -74,7 +74,7 @@ fn getEventLog(
     last_entry: *u64,
     truncated: *bool,
 ) callconv(.c) usize {
-    if (format != EVENT_LOG_FORMAT_TCG_2) return @intFromEnum(Status.invalid_parameter);
+    if (format != EVENT_LOG_FORMAT_TCG_2) return @backingInt(Status.invalid_parameter);
     log_loc.* = tpm.eventLogStart();
     last_entry.* = tpm.eventLogLastEntry();
     truncated.* = tpm.logTruncated();
@@ -93,9 +93,9 @@ fn hashLogExtendEvent(
     data_len: u64,
     event: [*]u8,
 ) callconv(.c) usize {
-    if (!tpm.isAvailable()) return @intFromEnum(Status.device_error);
+    if (!tpm.isAvailable()) return @backingInt(Status.device_error);
     const size = std.mem.readInt(u32, event[0..4], .little);
-    if (size < 18) return @intFromEnum(Status.invalid_parameter);
+    if (size < 18) return @backingInt(Status.invalid_parameter);
     const pcr = std.mem.readInt(u32, event[10..14], .little);
     const event_type = std.mem.readInt(u32, event[14..18], .little);
     const event_data = event[18..size];
@@ -107,9 +107,9 @@ fn hashLogExtendEvent(
     const want_log = flags & HLEE_EXTEND_ONLY == 0;
     if (want_log) {
         if (!tpm.logExtend(pcr, event_type, &digest, event_data))
-            return @intFromEnum(Status.device_error);
+            return @backingInt(Status.device_error);
     } else {
-        if (!tpm.extendOnly(pcr, &digest)) return @intFromEnum(Status.device_error);
+        if (!tpm.extendOnly(pcr, &digest)) return @backingInt(Status.device_error);
     }
     return ok;
 }
@@ -122,7 +122,7 @@ fn submitCommand(
     out_block: [*]u8,
 ) callconv(.c) usize {
     if (tpm2.submit(in_block[0..in_size], out_block[0..out_size]) == null)
-        return @intFromEnum(Status.device_error);
+        return @backingInt(Status.device_error);
     return ok;
 }
 

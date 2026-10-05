@@ -42,7 +42,7 @@ pub fn sizeOf(image: []const u8) Error!usize {
     var pe = coff.Coff.init(image, false) catch return error.BadPe;
     if (!pe.is_image) return error.NotImage;
     if (pe.getHeader().machine != .RISCV64) return error.NotRiscv64;
-    if (@intFromEnum(pe.getOptionalHeader().magic) != coff.IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+    if (@backingInt(pe.getOptionalHeader().magic) != coff.IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
         return error.NotPe32Plus;
     }
     return pe.getOptionalHeader64().size_of_image;
@@ -56,7 +56,7 @@ pub fn loadAt(image: []const u8, load_base: usize, max_image: usize) Error!Loade
     if (!pe.is_image) return error.NotImage;
 
     if (pe.getHeader().machine != .RISCV64) return error.NotRiscv64;
-    if (@intFromEnum(pe.getOptionalHeader().magic) != coff.IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+    if (@backingInt(pe.getOptionalHeader().magic) != coff.IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
         return error.NotPe32Plus;
     }
 
@@ -155,7 +155,7 @@ fn relocate(
     if (delta == 0) return; // loaded at its preferred base, nothing to fix up
 
     const dirs = pe.getDataDirectories();
-    const idx = @intFromEnum(coff.IMAGE.DIRECTORY_ENTRY.BASERELOC);
+    const idx = @backingInt(coff.IMAGE.DIRECTORY_ENTRY.BASERELOC);
     if (idx >= dirs.len) return;
     const reloc = dirs[idx];
     // No relocation table: the image is position-independent and relocates

@@ -58,7 +58,10 @@
 
           treefmt.programs = {
             nixfmt.enable = true;
-            zig.enable = true;
+            zig = {
+              enable = true;
+              package = pkgs.zig_0_17;
+            };
           };
 
           overlayAttrs = {

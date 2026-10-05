@@ -60,7 +60,7 @@ fn initLog() void {
     log_truncated = false;
     logU32(0); // pcrIndex
     logU32(EV_NO_ACTION); // eventType
-    logBytes(&[_]u8{0} ** 20); // SHA1 digest field (zero)
+    logBytes(&@as([20]u8, @splat(0))); // SHA1 digest field (zero)
     // eventSize + TCG_EfiSpecIdEvent
     const spec_size: u32 = 16 + 4 + 4 + 4 + (2 + 2) + 1; // sig+class+ver+count+1 alg+vendorlen
     logU32(spec_size);

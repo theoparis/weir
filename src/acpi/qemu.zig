@@ -23,7 +23,7 @@ var pool_next: usize = POOL_BASE;
 var rsdp_addr: usize = 0;
 
 const Blob = struct {
-    name: [56]u8 = [_]u8{0} ** 56,
+    name: [56]u8 = @splat(0),
     name_len: usize = 0,
     buf: []u8 = &.{},
 };

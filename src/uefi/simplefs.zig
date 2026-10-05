@@ -13,7 +13,7 @@ const block = @import("../block/block.zig");
 const console = @import("../console/console.zig");
 
 const Status = uefi.Status;
-const ok = @intFromEnum(Status.success);
+const ok = @backingInt(Status.success);
 const File = uefi.protocol.File;
 const SimpleFileSystem = uefi.protocol.SimpleFileSystem;
 
@@ -79,7 +79,7 @@ fn alloc() ?*Handle {
 
 fn openVolume(self: *const SimpleFileSystem, out: **File) callconv(.c) usize {
     _ = self;
-    const h = alloc() orelse return @intFromEnum(Status.out_of_resources);
+    const h = alloc() orelse return @backingInt(Status.out_of_resources);
     h.is_dir = true;
     h.loc = fat.rootLoc();
     h.name[0] = '\\';
@@ -101,7 +101,7 @@ fn fileOpen(
     _ = mode;
     _ = attr;
     const h: *Handle = @ptrCast(self);
-    if (!h.is_dir) return @intFromEnum(Status.not_found);
+    if (!h.is_dir) return @backingInt(Status.not_found);
 
     // Start at root for an absolute path, else at this directory.
     var loc = h.loc;
@@ -128,16 +128,16 @@ fn fileOpen(
         if (c == 0) continue;
         if (c == 1 and comp[0] == '.') continue;
 
-        if (!fat.lookupComponent(loc, comp[0..c], &last)) return @intFromEnum(Status.not_found);
+        if (!fat.lookupComponent(loc, comp[0..c], &last)) return @backingInt(Status.not_found);
         resolved = true;
         is_dir = last.is_dir;
         if (name[i] != 0) {
-            if (!last.is_dir) return @intFromEnum(Status.not_found);
+            if (!last.is_dir) return @backingInt(Status.not_found);
             loc = .{ .root16 = false, .cluster = last.cluster };
         }
     }
 
-    const nh = alloc() orelse return @intFromEnum(Status.out_of_resources);
+    const nh = alloc() orelse return @backingInt(Status.out_of_resources);
     if (!resolved) {
         // Opened the directory itself (e.g. trailing separators).
         nh.is_dir = true;
@@ -165,7 +165,7 @@ fn fileClose(self: *File) callconv(.c) usize {
 
 fn fileDelete(self: *File) callconv(.c) usize {
     _ = self;
-    return @intFromEnum(Status.unsupported);
+    return @backingInt(Status.unsupported);
 }
 
 fn fileRead(self: *File, buffer_size: *usize, buffer: [*]u8) callconv(.c) usize {
@@ -199,7 +199,7 @@ fn fileWrite(self: *File, buffer_size: *usize, buffer: [*]const u8) callconv(.c)
     _ = self;
     _ = buffer_size;
     _ = buffer;
-    return @intFromEnum(Status.write_protected);
+    return @backingInt(Status.write_protected);
 }
 
 fn fileGetPosition(self: *const File, pos: *u64) callconv(.c) usize {
@@ -223,11 +223,11 @@ fn fileGetInfo(
 ) callconv(.c) usize {
     const h: *const Handle = @ptrCast(self);
     if (!std.mem.eql(u8, std.mem.asBytes(guid), std.mem.asBytes(&File.Info.File.guid))) {
-        return @intFromEnum(Status.unsupported);
+        return @backingInt(Status.unsupported);
     }
     const buf = if (buffer) |b| b[0..size.*] else {
         size.* = 80 + h.name_units * 2;
-        return @intFromEnum(Status.buffer_too_small);
+        return @backingInt(Status.buffer_too_small);
     };
     return writeFileInfo(buf, size, h.name[0..h.name_units], h.size, h.is_dir);
 }
@@ -242,7 +242,7 @@ fn fileSetInfo(
     _ = guid;
     _ = size;
     _ = buffer;
-    return @intFromEnum(Status.write_protected);
+    return @backingInt(Status.write_protected);
 }
 
 fn fileFlush(self: *File) callconv(.c) usize {
@@ -255,7 +255,7 @@ fn writeFileInfo(buf: []u8, size: *usize, name: []const u16, file_size: u32, is_
     const needed = 80 + name.len * 2;
     if (buf.len < needed) {
         size.* = needed;
-        return @intFromEnum(Status.buffer_too_small);
+        return @backingInt(Status.buffer_too_small);
     }
     @memset(buf[0..needed], 0);
     std.mem.writeInt(u64, buf[0..8], needed, .little); // Size

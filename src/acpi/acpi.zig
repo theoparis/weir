@@ -27,7 +27,7 @@ pub fn setup(dsdt: ?[]const u8) void {
 /// SPCR body (after the 36-byte SDT header): a full-16550 console at `uart_base`,
 /// byte-wide registers, 115200 8N1, polled.
 fn spcrBody(uart_base: u64) [44]u8 {
-    var b = [_]u8{0} ** 44;
+    var b: [44]u8 = @splat(0);
     b[0] = 0x00; // interface type: full 16550
     b[4] = 0x00; // base address GAS: system memory
     b[5] = 8; // register bit width
