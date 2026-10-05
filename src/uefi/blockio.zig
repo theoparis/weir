@@ -10,7 +10,7 @@ const blk = @import("../virtio/blk.zig");
 const handledb = @import("handledb.zig");
 
 const Status = uefi.Status;
-const ok = @intFromEnum(Status.success);
+const ok = @backingInt(Status.success);
 const BlockIo = uefi.protocol.BlockIo;
 const Media = BlockIo.BlockMedia;
 
@@ -74,9 +74,9 @@ fn readBlocks(
 ) callconv(.c) usize {
     _ = self;
     _ = media_id;
-    if (buffer_size % dev.block_size != 0) return @intFromEnum(Status.bad_buffer_size);
+    if (buffer_size % dev.block_size != 0) return @backingInt(Status.bad_buffer_size);
     const count: u32 = @intCast(buffer_size / dev.block_size);
-    if (!dev.readBlocks(lba, count, buf[0..buffer_size])) return @intFromEnum(Status.device_error);
+    if (!dev.readBlocks(lba, count, buf[0..buffer_size])) return @backingInt(Status.device_error);
     return ok;
 }
 
@@ -92,7 +92,7 @@ fn writeBlocks(
     _ = lba;
     _ = buffer_size;
     _ = buf;
-    return @intFromEnum(Status.write_protected);
+    return @backingInt(Status.write_protected);
 }
 
 fn flushBlocks(self: *BlockIo) callconv(.c) usize {
@@ -161,10 +161,10 @@ fn partRead(
     _ = self;
     _ = media_id;
     const bs = part_dev.dev.block_size;
-    if (buffer_size % bs != 0) return @intFromEnum(Status.bad_buffer_size);
+    if (buffer_size % bs != 0) return @backingInt(Status.bad_buffer_size);
     const count: u32 = @intCast(buffer_size / bs);
     if (!part_dev.readBlocks(lba, count, buf[0..buffer_size])) {
-        return @intFromEnum(Status.device_error);
+        return @backingInt(Status.device_error);
     }
     return ok;
 }

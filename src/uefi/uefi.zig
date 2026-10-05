@@ -175,7 +175,7 @@ fn bumpAlloc(size: usize, alignment: usize) ?usize {
     return null;
 }
 
-const ok = @intFromEnum(Status.success);
+const ok = @backingInt(Status.success);
 
 // Images loaded through the LoadImage boot service (the bootloader loading a
 // kernel). Each keeps its entry point and a LoadedImage protocol the app reads
@@ -212,10 +212,10 @@ fn tr(comptime name: []const u8) void {
 /// Generic stub for unimplemented services: returns unsupported.
 fn stub() callconv(.c) usize {
     tr("<unimplemented boot service>");
-    return @intFromEnum(Status.unsupported);
+    return @backingInt(Status.unsupported);
 }
 
-const not_found = @intFromEnum(Status.not_found);
+const not_found = @backingInt(Status.not_found);
 
 fn guidEql(a: *const uefi.Guid, b: *const uefi.Guid) bool {
     return std.mem.eql(u8, std.mem.asBytes(a), std.mem.asBytes(b));
@@ -283,13 +283,13 @@ fn locateHandle(
 ) callconv(.c) usize {
     _ = search_type;
     _ = key;
-    const g = guid orelse return @intFromEnum(Status.invalid_parameter);
+    const g = guid orelse return @backingInt(Status.invalid_parameter);
     var tmp: [32]*handledb.Handle = undefined;
     const n = handledb.locateHandles(g, &tmp);
     const needed = n * @sizeOf(uefi.Handle);
     if (buffer == null or buffer_size.* < needed) {
         buffer_size.* = needed;
-        return @intFromEnum(Status.buffer_too_small);
+        return @backingInt(Status.buffer_too_small);
     }
     var i: usize = 0;
     while (i < n) : (i += 1) buffer.?[i] = @ptrCast(tmp[i]);
@@ -307,13 +307,13 @@ fn locateHandleBuffer(
 ) callconv(.c) usize {
     _ = search_type;
     _ = key;
-    const g = guid orelse return @intFromEnum(Status.invalid_parameter);
+    const g = guid orelse return @backingInt(Status.invalid_parameter);
     var tmp: [32]*handledb.Handle = undefined;
     const n = handledb.locateHandles(g, &tmp);
     if (n == 0) return not_found;
     var out: ?*anyopaque = null;
     if (allocatePool(0, n * @sizeOf(uefi.Handle), &out) != ok) {
-        return @intFromEnum(Status.out_of_resources);
+        return @backingInt(Status.out_of_resources);
     }
     const handles: [*]uefi.Handle = @ptrCast(@alignCast(out.?));
     var i: usize = 0;
@@ -344,7 +344,7 @@ fn installProtocolInterface(
     _ = itype;
     const existing: ?*handledb.Handle = if (handle.*) |hp| @ptrCast(@alignCast(hp)) else null;
     const h = handledb.install(existing, guid, interface) orelse
-        return @intFromEnum(Status.out_of_resources);
+        return @backingInt(Status.out_of_resources);
     handle.* = @ptrCast(h);
     return ok;
 }
@@ -361,7 +361,7 @@ fn installMultipleProtocolInterfaces(handle: *?*anyopaque, ...) callconv(.c) usi
         const interface = @cVaArg(&va, *anyopaque);
         const existing: ?*handledb.Handle = if (handle.*) |hp| @ptrCast(@alignCast(hp)) else null;
         const h = handledb.install(existing, guid, interface) orelse
-            return @intFromEnum(Status.out_of_resources);
+            return @backingInt(Status.out_of_resources);
         handle.* = @ptrCast(h);
     }
     return ok;
@@ -384,7 +384,7 @@ fn installConfigurationTable(guid: *const uefi.Guid, table: ?*anyopaque) callcon
         return ok;
     }
     if (table) |t| {
-        if (config_count >= config_table.len) return @intFromEnum(Status.out_of_resources);
+        if (config_count >= config_table.len) return @backingInt(Status.out_of_resources);
         config_table[config_count] = .{ .vendor_guid = guid.*, .vendor_table = t };
         config_count += 1;
         system_table.number_of_table_entries = config_count;
@@ -400,10 +400,11 @@ fn textOk() callconv(.c) usize {
 
 /// Point every pointer field of a table at a stub, leaving `hdr` alone.
 fn stubAll(comptime T: type, table: *T) void {
-    inline for (std.meta.fields(T)) |f| {
-        if (comptime std.mem.eql(u8, f.name, "hdr")) continue;
-        if (comptime @typeInfo(f.type) == .pointer) {
-            @field(table.*, f.name) = @ptrFromInt(@intFromPtr(&stub));
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |name, field_type| {
+        if (comptime std.mem.eql(u8, name, "hdr")) continue;
+        if (comptime @typeInfo(field_type) == .pointer) {
+            @field(table.*, name) = @ptrFromInt(@intFromPtr(&stub));
         }
     }
 }
@@ -505,7 +506,7 @@ fn decodeKey(buf: []const u8) KeyDecode {
 fn inReadKey(self: *uefi.protocol.SimpleTextInput, key: *anyopaque) callconv(.c) usize {
     _ = self;
     fillKeys();
-    if (key_len == 0) return @intFromEnum(Status.not_ready);
+    if (key_len == 0) return @backingInt(Status.not_ready);
 
     // Give a partial escape sequence a short window to finish arriving. A
     // terminal sends the whole sequence back to back, so a few milliseconds is
@@ -525,7 +526,7 @@ fn inReadKey(self: *uefi.protocol.SimpleTextInput, key: *anyopaque) callconv(.c)
     const k: *InputKey = @ptrCast(@alignCast(key));
     k.* = .{ .scan_code = dec.scan, .unicode_char = dec.char };
     // A consumed-but-unmapped sequence (scan and char both zero) is not a key.
-    if (dec.scan == 0 and dec.char == 0) return @intFromEnum(Status.not_ready);
+    if (dec.scan == 0 and dec.char == 0) return @backingInt(Status.not_ready);
     return ok;
 }
 
@@ -544,7 +545,7 @@ fn outString(self: *uefi.protocol.SimpleTextOutput, str: [*:0]const u16) callcon
 fn allocatePool(pool_type: u32, size: usize, buffer: *?*anyopaque) callconv(.c) usize {
     tr("allocatePool");
     _ = pool_type;
-    const addr = bumpAlloc(size, 8) orelse return @intFromEnum(Status.out_of_resources);
+    const addr = bumpAlloc(size, 8) orelse return @backingInt(Status.out_of_resources);
     buffer.* = @ptrFromInt(addr);
     return ok;
 }
@@ -567,12 +568,12 @@ fn allocatePages(alloc_type: u32, mem_type: u32, pages: usize, memory: *usize) c
     if (alloc_type == 2) {
         const req = memory.*;
         if (req < FW_RESERVED_END or req +% size < req or req + size > RAM_END) {
-            return @intFromEnum(Status.out_of_resources);
+            return @backingInt(Status.out_of_resources);
         }
         reserveRegion(req, req + size);
         return ok;
     }
-    const addr = bumpAlloc(size, 4096) orelse return @intFromEnum(Status.out_of_resources);
+    const addr = bumpAlloc(size, 4096) orelse return @backingInt(Status.out_of_resources);
     memory.* = addr;
     if (trace) console.out.print("[uefi]   -> pages at {x}\n", .{addr}) catch {};
     return ok;
@@ -625,7 +626,7 @@ fn getMemoryMap(
     desc_ver.* = 1;
     if (mmap == null or mmap_size.* < needed) {
         mmap_size.* = needed;
-        return @intFromEnum(Status.buffer_too_small);
+        return @backingInt(Status.buffer_too_small);
     }
 
     // EFI_MEMORY_WB: ordinary writeback-cacheable RAM.
@@ -801,31 +802,31 @@ fn loadImage( // zippy:ignore too_many_params UEFI LoadImage ABI is fixed
 
     // The image bytes: an explicit buffer, or the file the device path names.
     const src: []const u8 = if (source_buffer) |sb| blk: {
-        if (source_size == 0) return @intFromEnum(Status.invalid_parameter);
+        if (source_size == 0) return @backingInt(Status.invalid_parameter);
         break :blk sb[0..source_size];
     } else blk: {
-        const dp = device_path orelse return @intFromEnum(Status.invalid_parameter);
+        const dp = device_path orelse return @backingInt(Status.invalid_parameter);
         var name_buf: [256]u8 = undefined;
         const path = devicePathFile(@ptrCast(dp), &name_buf) orelse return not_found;
         const fsize = fat.fileSize(path) orelse return not_found;
-        const scratch = bumpAlloc(fsize, 8) orelse return @intFromEnum(Status.out_of_resources);
+        const scratch = bumpAlloc(fsize, 8) orelse return @backingInt(Status.out_of_resources);
         const sbuf = @as([*]u8, @ptrFromInt(scratch))[0..fsize];
         // A multi-MiB image over polled SPI takes many seconds. Announce the read
         // so a slow load reads as progress, not a hang.
-        const got = fat.readFile(path, sbuf) orelse return @intFromEnum(Status.device_error);
-        if (got != fsize) return @intFromEnum(Status.device_error);
+        const got = fat.readFile(path, sbuf) orelse return @backingInt(Status.device_error);
+        if (got != fsize) return @backingInt(Status.device_error);
         break :blk sbuf;
     };
 
     // Place the image in a fresh page-aligned region above the loaded bootloader,
     // and reserve it so no later allocation aliases the loaded image.
-    const image_size = pe.sizeOf(src) catch return @intFromEnum(Status.load_error);
-    const base = bumpAlloc(image_size, 4096) orelse return @intFromEnum(Status.out_of_resources);
+    const image_size = pe.sizeOf(src) catch return @backingInt(Status.load_error);
+    const base = bumpAlloc(image_size, 4096) orelse return @backingInt(Status.out_of_resources);
     reserveRegion(base, base + image_size);
-    const loaded = pe.loadAt(src, base, image_size) catch return @intFromEnum(Status.load_error);
+    const loaded = pe.loadAt(src, base, image_size) catch return @backingInt(Status.load_error);
 
-    const slot = loadedImageSlot() orelse return @intFromEnum(Status.out_of_resources);
-    const h = handledb.create() orelse return @intFromEnum(Status.out_of_resources);
+    const slot = loadedImageSlot() orelse return @backingInt(Status.out_of_resources);
+    const h = handledb.create() orelse return @backingInt(Status.out_of_resources);
     slot.used = true;
     slot.handle = h;
     slot.entry = loaded.entry;
@@ -859,10 +860,10 @@ fn startImage(image: uefi.Handle, exit_data_size: ?*usize, exit_data: ?*[*]u16) 
     _ = exit_data;
     if (exit_data_size) |s| s.* = 0;
     const h: *handledb.Handle = @ptrCast(@alignCast(image));
-    const slot = findLoadedImage(h) orelse return @intFromEnum(Status.invalid_parameter);
+    const slot = findLoadedImage(h) orelse return @backingInt(Status.invalid_parameter);
     const EntryFn = *const fn (uefi.Handle, *tables.SystemTable) callconv(.c) Status;
     const entry: EntryFn = @ptrFromInt(slot.entry);
-    return @intFromEnum(entry(image, &system_table));
+    return @backingInt(entry(image, &system_table));
 }
 
 /// UnloadImage: drop a loaded image the app chose not to start. The bump
@@ -984,7 +985,7 @@ fn createEvent(
     out: *?*anyopaque,
 ) callconv(.c) usize {
     _ = notify_tpl;
-    const e = eventAlloc() orelse return @intFromEnum(Status.out_of_resources);
+    const e = eventAlloc() orelse return @backingInt(Status.out_of_resources);
     e.is_timer = (etype & EVT_TIMER) != 0;
     e.notify_fn = notify_fn;
     e.notify_ctx = notify_ctx;
@@ -1005,7 +1006,7 @@ fn createEventEx( // zippy:ignore too_many_params UEFI CreateEventEx ABI is fixe
 }
 
 fn setTimer(event: ?*anyopaque, delay: u32, trigger_time: u64) callconv(.c) usize {
-    const e = eventOf(event) orelse return @intFromEnum(Status.invalid_parameter);
+    const e = eventOf(event) orelse return @backingInt(Status.invalid_parameter);
     switch (delay) {
         0 => { // cancel
             e.timer_armed = false;
@@ -1022,18 +1023,18 @@ fn setTimer(event: ?*anyopaque, delay: u32, trigger_time: u64) callconv(.c) usiz
             e.periodic = false;
             e.deadline = clint.time() + timerTicks(trigger_time);
         },
-        else => return @intFromEnum(Status.invalid_parameter),
+        else => return @backingInt(Status.invalid_parameter),
     }
     return ok;
 }
 
 fn waitForEvent(event_len: usize, evs: [*]const ?*anyopaque, index: *usize) callconv(.c) usize {
-    if (event_len == 0) return @intFromEnum(Status.invalid_parameter);
+    if (event_len == 0) return @backingInt(Status.invalid_parameter);
     var i: usize = 0;
     while (i < event_len) : (i += 1) {
         if (eventOf(evs[i]) == null) {
             index.* = i;
-            return @intFromEnum(Status.invalid_parameter);
+            return @backingInt(Status.invalid_parameter);
         }
     }
     // Poll the events until one is ready. This blocks, as WaitForEvent must.
@@ -1051,23 +1052,23 @@ fn waitForEvent(event_len: usize, evs: [*]const ?*anyopaque, index: *usize) call
 }
 
 fn checkEvent(event: ?*anyopaque) callconv(.c) usize {
-    const e = eventOf(event) orelse return @intFromEnum(Status.invalid_parameter);
+    const e = eventOf(event) orelse return @backingInt(Status.invalid_parameter);
     if (eventReady(e)) {
         e.signaled = false;
         return ok;
     }
-    return @intFromEnum(Status.not_ready);
+    return @backingInt(Status.not_ready);
 }
 
 fn signalEvent(event: ?*anyopaque) callconv(.c) usize {
-    const e = eventOf(event) orelse return @intFromEnum(Status.invalid_parameter);
+    const e = eventOf(event) orelse return @backingInt(Status.invalid_parameter);
     e.signaled = true;
     if (e.notify_fn) |f| f(@ptrCast(e), e.notify_ctx);
     return ok;
 }
 
 fn closeEvent(event: ?*anyopaque) callconv(.c) usize {
-    const e = eventOf(event) orelse return @intFromEnum(Status.invalid_parameter);
+    const e = eventOf(event) orelse return @backingInt(Status.invalid_parameter);
     // The key event belongs to ConIn, not the app: keep it alive.
     if (e != wait_key_event) e.used = false;
     return ok;
@@ -1092,7 +1093,7 @@ fn setVirtualAddressMap(
 // --- EFI variable runtime services (flash-backed) ---------------------------
 
 fn statusOf(r: varstore.Result) usize {
-    return @intFromEnum(switch (r) {
+    return @backingInt(switch (r) {
         .success => Status.success,
         .not_found => Status.not_found,
         .buffer_too_small => Status.buffer_too_small,
@@ -1133,7 +1134,7 @@ fn queryVariableInfo(
     max_var: *u64,
 ) callconv(.c) usize {
     _ = attributes;
-    if (!varstore.available()) return @intFromEnum(Status.unsupported);
+    if (!varstore.available()) return @backingInt(Status.unsupported);
     varstore.queryInfo(max_storage, remaining, max_var);
     return ok;
 }
@@ -1169,7 +1170,7 @@ fn setTime(t: *const uefi.Time) callconv(.c) usize {
         .second = t.second,
     });
     // A present but read-only RTC cannot take the write.
-    return if (written) ok else @intFromEnum(Status.device_error);
+    return if (written) ok else @backingInt(Status.device_error);
 }
 
 fn resetSystem(
@@ -1197,7 +1198,7 @@ pub fn imageHandle() uefi.Handle {
 fn fixCrc(comptime T: type, hdr: *tables.TableHeader, table: *const T) void {
     hdr.crc32 = 0;
     const bytes = @as([*]const u8, @ptrCast(table))[0..@sizeOf(T)];
-    hdr.crc32 = std.hash.crc.Crc32.hash(bytes);
+    hdr.crc32 = std.hash.Crc32.hash(bytes);
 }
 
 // The handle DB has spare capacity during table construction, so install never
@@ -1323,7 +1324,7 @@ pub fn prepare(dtb: usize, hartid: usize, image_base: usize, image_size: usize) 
     };
 
     // A bare End-of-Hardware device path for the loaded image.
-    end_path = .{ .type = @enumFromInt(0x7f), .subtype = 0xff, .length = 4 };
+    end_path = .{ .type = @fromBackingInt(@intCast(0x7f)), .subtype = 0xff, .length = 4 };
 
     // Loaded Image protocol: where the app sits and its command line.
     loaded_image = .{

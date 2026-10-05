@@ -80,7 +80,7 @@ pub const KnobFeedback = enum {
 
 /// One tunable PHY delay, taken from a `knob@N` node in the device tree.
 pub const Knob = struct {
-    name_buf: [NAME_CAP]u8 = [_]u8{0} ** NAME_CAP,
+    name_buf: [NAME_CAP]u8 = @splat(0),
     name_len: usize = 0,
     /// Register byte offset inside the window.
     reg: u32 = 0,
@@ -103,7 +103,7 @@ pub const TrainDesc = struct {
     train_base: u64 = 0,
     stride: u32 = 8,
     lanes: u32 = 0,
-    knobs: [MAX_KNOBS]Knob = [_]Knob{.{}} ** MAX_KNOBS,
+    knobs: [MAX_KNOBS]Knob = @splat(.{}),
     knob_count: usize = 0,
     rows: u32 = 0,
     cols: u32 = 0,
@@ -396,7 +396,7 @@ fn widestCenter(pass: []const bool, min: u32, max: u32) SweepResult {
 /// so the engine can set any tap directly. Return the centre of the widest passing
 /// window.
 fn sweepAbsolute(a: SweepArgs) SweepResult {
-    var pass = [_]bool{false} ** 33; // taps 0..31 plus a guard slot
+    var pass: [33]bool = @splat(false); // taps 0..31 plus a guard slot
     const mask = sliceMask(a.d, a.knob, a.slice);
     var tap = a.knob.min;
     var pass_count: u32 = 0;
@@ -423,7 +423,7 @@ fn advanceOne(d: *const TrainDesc, knob: *const Knob, lane: u32) void {
 /// absolute count, so the engine steps it forward and checks each count. The count
 /// range wraps at max+1. The sweep assumes the level starts at 0.
 fn sweepAdvance(a: SweepArgs) SweepResult {
-    var pass = [_]bool{false} ** 9; // counts 0..7 plus a guard slot
+    var pass: [9]bool = @splat(false); // counts 0..7 plus a guard slot
     const mask = sliceMask(a.d, a.knob, a.slice);
     const span = a.knob.max + 1; // the wrap period, e.g. 8 for a 3-bit slip
     var pass_count: u32 = 0;
@@ -585,7 +585,7 @@ test "parseTrainingNode reads the creek runtime training node" {
 
 test "widestCenter picks the centre of the widest run" {
     // Two runs: 1..2 (width 2) and 5..8 (width 4). The wider run wins.
-    var pass = [_]bool{false} ** 33;
+    var pass: [33]bool = @splat(false);
     pass[1] = true;
     pass[2] = true;
     pass[5] = true;
@@ -598,7 +598,7 @@ test "widestCenter picks the centre of the widest run" {
 }
 
 test "widestCenter reports no window when nothing passes" {
-    const pass = [_]bool{false} ** 33;
+    const pass: [33]bool = @splat(false);
     const res = widestCenter(pass[0..], 0, 31);
     try std.testing.expect(!res.found);
 }

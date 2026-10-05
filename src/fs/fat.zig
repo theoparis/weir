@@ -275,7 +275,7 @@ fn readChain(s: *State, start_cluster: u32, size: u32, buf: []u8) ?usize {
 pub const Loc = struct { root16: bool, cluster: u32 };
 
 pub const DirEnt = struct {
-    name: [256]u16 = [_]u16{0} ** 256, // UTF-16, null-terminated
+    name: [256]u16 = @splat(0), // UTF-16, null-terminated
     name_units: usize = 0, // including the null
     cluster: u32 = 0,
     size: u32 = 0,

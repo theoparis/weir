@@ -15,7 +15,7 @@ pub const SOFT: u32 = 1 << 0; // relay to S-mode as SSIP
 pub const FENCE_I: u32 = 1 << 1; // execute FENCE.I locally
 pub const SFENCE_VMA: u32 = 1 << 2; // execute SFENCE.VMA locally (full flush)
 
-var pending: [MAX_HARTS]u32 = [_]u32{0} ** MAX_HARTS;
+var pending: [MAX_HARTS]u32 = @splat(0);
 
 /// Queue `ops` on `target` and signal it. Fire-and-forget (used for SOFT relays).
 pub fn send(target: usize, ops: u32) void {

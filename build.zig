@@ -169,7 +169,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_elf.step);
 
     // Flat image for `-bios`.
-    const bin = exe.addObjCopy(.{ .format = .bin });
+    const bin = exe.addObjCopy(.{ .format = .binary });
     const install_bin = b.addInstallBinFile(bin.getOutput(), "weir-firmware.bin");
     b.getInstallStep().dependOn(&install_bin.step);
 
@@ -239,7 +239,7 @@ pub fn build(b: *std.Build) void {
         "-bios",
     });
     run.addFileArg(bin.getOutput());
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     const qemu_step = b.step("qemu", "Boot Weir under qemu-system-riscv64 -machine virt");
     qemu_step.dependOn(&run.step);
 
@@ -281,7 +281,7 @@ pub fn build(b: *std.Build) void {
         fexe.entry = .{ .symbol_name = "_start" };
         fexe.setLinkerScript(genLd(b, ld_gen, dtb_path, "fsbl", null));
 
-        const fbin = fexe.addObjCopy(.{ .format = .bin });
+        const fbin = fexe.addObjCopy(.{ .format = .binary });
         const finstall = b.addInstallBinFile(fbin.getOutput(), "weir-fsbl.bin");
 
         b.getInstallStep().dependOn(&finstall.step);

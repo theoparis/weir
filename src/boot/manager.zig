@@ -91,7 +91,7 @@ fn tryDevice(sd: storage.Device, i: usize, buf: []u8) ?pe.Loaded {
     // boot media (controller kind + MMIO base), so the ESP handle carries a
     // distinct path a bootloader can match, then publish the ESP via Simple File
     // System so the loaded bootloader reads its config, kernel, and initrd.
-    blockio.setBootMedia(@intFromEnum(sd.kind), sd.base);
+    blockio.setBootMedia(@backingInt(sd.kind), sd.base);
     if (handledb.create()) |h| {
         if (simplefs.install(h, part))
             console.out.writeAll("[boot] ESP published via Simple File System\n") catch {};
