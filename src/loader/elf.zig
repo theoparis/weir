@@ -1,9 +1,13 @@
-//! Minimal ELF64 loader for RISC-V S-mode payloads.
+//! Minimal ELF64 loader for S-mode payloads.
 //!
 //! Copies PT_LOAD segments to their physical addresses, zeroes any trailing
 //! .bss, and returns the entry point. The caller enters it in S-mode.
+//!
+//! The payload is written for the machine the firmware runs on, so nothing here
+//! depends on which one that is beyond syncing the instruction cache.
 
 const std = @import("std");
+const arch = @import("../arch.zig");
 
 pub const Error = error{
     Truncated,
@@ -44,6 +48,6 @@ pub fn load(image: []const u8) Error!usize {
     }
 
     // The payload is freshly written code. Make the I-fetch path see it.
-    asm volatile ("fence.i" ::: .{ .memory = true });
+    arch.cpu.syncInstructionCache();
     return @intCast(e_entry);
 }

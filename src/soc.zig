@@ -6,6 +6,7 @@
 //! back to the common addresses.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const conduit = @import("conduit");
 const has_dt = @import("build_options").has_dtb;
 
@@ -13,21 +14,31 @@ const has_dt = @import("build_options").has_dtb;
 // embedded DTB once at comptime. It lowers each matched node's reg into an MMIO
 // resource, and its clock frequency into a Clock resource.
 const matchers = [_]conduit.Matcher{
-    .{ .class = .uart, .dt_compatible = &.{ "ns16550a", "ns16550", "snps,dw-apb-uart" } },
-    .{ .class = .timer, .dt_compatible = &.{ "riscv,clint0", "sifive,clint0" } },
+    // A 16550-style UART (QEMU's RISC-V virt, River) or an ARM PL011 (QEMU's
+    // aarch64 virt, most ARM SoCs). console.zig binds the driver the matched id
+    // selects: the two register maps are not compatible.
+    .{ .class = .uart, .dt_compatible = &.{ "ns16550a", "ns16550", "snps,dw-apb-uart", "arm,pl011" } },
+    // The timer: a RISC-V CLINT, or the AArch64 architectured timer. The two
+    // differ in kind — a CLINT is a register window the firmware programs, the
+    // architectured timer is system registers plus four GIC interrupts, and the
+    // node's `interrupts` are what the ACPI GTDT publishes.
+    .{ .class = .timer, .dt_compatible = &.{ "riscv,clint0", "sifive,clint0", "arm,armv8-timer" } },
     // The /memory node has no compatible property. conduit exposes its device_type.
     .{ .class = .memory, .dt_compatible = &.{"memory"} },
-    .{ .class = .flash, .dt_compatible = &.{"jedec,spi-nor"} },
+    // SPI-NOR as on River, or the parallel NOR (cfi-flash) QEMU's aarch64 virt
+    // maps at address 0 for -bios. Both are the XIP boot flash.
+    .{ .class = .flash, .dt_compatible = &.{ "jedec,spi-nor", "cfi-flash" } },
     .{ .class = .sdram, .dt_compatible = &.{ "harbor,ddr3-sdram", "harbor,sdram-controller" } },
     .{ .class = .tpm, .dt_compatible = &.{ "tcg,tpm-tis-mmio", "tcg,tpm-tis" } },
-    // A goldfish RTC (QEMU virt). Only this RTC IP is matched today, so time.zig
-    // binds it directly. A new RTC needs its compatible here and a bind arm there.
-    .{ .class = .rtc, .dt_compatible = &.{"google,goldfish-rtc"} },
+    // An RTC: the goldfish part QEMU's RISC-V virt carries, or the ARM PL031 on
+    // its aarch64 virt. time.zig binds the one the matched id names.
+    .{ .class = .rtc, .dt_compatible = &.{ "google,goldfish-rtc", "arm,pl031" } },
     // A native SD/MMC host, or a virtio-mmio transport (QEMU). Both are the
     // `.block` class; storage.zig picks the driver by the matched compatible.
     .{ .class = .block, .dt_compatible = &.{ "harbor,sdhci", "harbor,sdio", "virtio,mmio" } },
-    // The external interrupt controller (PLIC), for the ACPI MADT.
-    .{ .class = .intc, .dt_compatible = &.{ "riscv,plic0", "sifive,plic-1.0.0" } },
+    // The external interrupt controller: a RISC-V PLIC, for the ACPI MADT, or an
+    // ARM GIC (v2 here; QEMU's aarch64 virt defaults to one).
+    .{ .class = .intc, .dt_compatible = &.{ "riscv,plic0", "sifive,plic-1.0.0", "arm,cortex-a15-gic", "arm,gic-400", "arm,gic-v2" } },
     // A Harbor SPI master. On creek it carries an SD card in SPI mode (PmodSD).
     // storage.zig probes it for a card when there is no native SD host.
     .{ .class = .spi, .dt_compatible = &.{ "harbor,spi", "midstall,harbor-spi" } },
@@ -44,6 +55,11 @@ pub const devices: []const conduit.Match = if (has_dt) blk: {
     var be = conduit.backend.dtree.DtBackend.init(&rd);
     break :blk conduit.Builder.scan(&be, &matchers);
 } else &.{};
+
+/// The device tree this build baked in, when it has one. The UEFI handoff
+/// publishes it to the OS through the configuration table, and the loader hands
+/// it to a kernel that boots from a tree. Null when the build carried none.
+pub const dtb: ?[]const u8 = if (has_dt) @embedFile("soc_dtb") else null;
 
 fn firstMmio(class: conduit.Class) ?conduit.Resource.MmioRegion {
     @setEvalBranchQuota(4_000_000);
@@ -88,6 +104,31 @@ fn countMmioId(class: conduit.Class, ids: []const []const u8) usize {
     return n;
 }
 
+// The baked match for a class whose ids include one of `ids`, if the tree has
+// one. Callers read several resources off the same device (see the GIC below).
+fn firstMatchIndex(class: conduit.Class, ids: []const []const u8) ?usize {
+    @setEvalBranchQuota(4_000_000);
+    for (devices, 0..) |*m, i| {
+        if (m.class != class) continue;
+        if (hasId(m, ids)) return i;
+    }
+    return null;
+}
+
+/// The baked match for a class, if the tree has one.
+fn firstOfClass(class: conduit.Class) ?usize {
+    @setEvalBranchQuota(4_000_000);
+    for (devices, 0..) |*m, i| if (m.class == class) return i;
+    return null;
+}
+
+/// Base of the `n`th MMIO window of the baked device at `match_index`. 0 when
+/// the device has no such window.
+fn mmioBaseAt(match_index: usize, n: usize) usize {
+    const r = devices[match_index].mmioAt(n) orelse return 0;
+    return @intCast(r.base);
+}
+
 const sdhci_ids = [_][]const u8{ "harbor,sdhci", "harbor,sdio" };
 const virtio_ids = [_][]const u8{"virtio,mmio"};
 
@@ -97,6 +138,51 @@ pub const uart_base: usize = if (firstMmio(.uart)) |r| @intCast(r.base) else 0x1
 // The default is a guess for a tree that omits it, and a guess here sets every
 // baud rate wrong. A board declares the rate instead of relying on it.
 pub const uart_clock: usize = if (firstClockHz(.uart)) |hz| @intCast(hz) else 24000000;
+
+/// True when the console UART is an ARM PL011 rather than a 16550-style part.
+/// console.zig binds the driver this selects, because the two register maps are
+/// not compatible: the same init sequence writes configuration to unrelated
+/// offsets on the other part.
+pub const uart_is_pl011: bool = firstMatchIndex(.uart, &pl011_ids) != null;
+const pl011_ids = [_][]const u8{"arm,pl011"};
+
+/// The console UART's interrupt, as the GSI an OS binds. conduit already lowered
+/// the node's specifier into that number (a GIC's is offset into its type's
+/// range, a PLIC's is the source), so this is the node's first interrupt as it
+/// comes back from the tree.
+pub const uart_gsi: u32 = if (firstOfClass(.uart)) |i|
+    (if (devices[i].irq(0)) |q| q.number else 0)
+else
+    0;
+
+/// The architectured timer's four interrupts as GSIs, in the order the node
+/// names them: secure EL1, non-secure EL1, virtual, non-secure EL2. This is the
+/// ACPI GTDT's timer list. All zero on a board whose timer node declares none,
+/// and on a board with no architectured timer at all (a RISC-V CLINT, whose
+/// machine timer raises its interrupt by CSR rather than through the controller).
+pub const timer_gsivs: [4]u32 = blk: {
+    @setEvalBranchQuota(4_000_000);
+    const i = firstOfClass(.timer) orelse break :blk .{ 0, 0, 0, 0 };
+    var gsivs = [4]u32{ 0, 0, 0, 0 };
+    for (&gsivs, 0..) |*g, n| {
+        const q = devices[i].irq(n) orelse break;
+        g.* = q.number;
+    }
+    break :blk gsivs;
+};
+
+// The ARM generic interrupt controller. Its distributor and CPU interface are
+// two MMIO windows of one tree node, so both come off the same match. The
+// firmware runs at EL1, which is the level the memory-mapped GICv2 CPU
+// interface serves.
+const gic_ids = [_][]const u8{ "arm,cortex-a15-gic", "arm,gic-400", "arm,gic-v2" };
+const gic_index = firstMatchIndex(.intc, &gic_ids);
+pub const gic_present: bool = gic_index != null;
+/// GIC distributor (GICD). 0 when the board has no GIC.
+pub const gic_dist_base: usize = if (gic_index) |i| mmioBaseAt(i, 0) else 0;
+/// GIC CPU interface (GICC). 0 when the board has no GIC.
+pub const gic_cpu_base: usize = if (gic_index) |i| mmioBaseAt(i, 1) else 0;
+
 pub const clint_base: usize = if (firstMmio(.timer)) |r| @intCast(r.base) else 0x2000000;
 
 /// The architectural timebase: the rate the RISC-V `time` counter (CLINT mtime)
@@ -123,6 +209,10 @@ const qemu_virt_timebase_hz: u64 = 10_000_000;
 /// Ticks per second of the CLINT mtime counter. Every computed delay and every
 /// reported time scales with it, so a wrong value is a proportional error in
 /// all of them.
+///
+/// This is the RISC-V counter. AArch64's system counter reports its own rate in
+/// CNTFRQ_EL0, an architectural register rather than a board property, so the
+/// ARM64 path reads src/arch/arm64/timer.zig and never this value.
 pub const timebase_hz: u64 = timebase_from_platform orelse qemu_virt_timebase_hz;
 
 fn readTimebaseHz() ?u64 {
@@ -145,8 +235,11 @@ const tpm_mmio = firstMmio(.tpm);
 pub const tpm_present: bool = tpm_mmio != null;
 pub const tpm_base: usize = if (tpm_mmio) |r| @intCast(r.base) else 0x04000000;
 
-// The PLIC (external interrupt controller), used to build the ACPI MADT.
-const plic_mmio = firstMmio(.intc);
+// The PLIC (RISC-V external interrupt controller), used to build the ACPI MADT.
+// The `.intc` class also holds an ARM GIC, so this filters on the PLIC ids: a
+// GIC has no `riscv,ndev` and no PLIC context map.
+const plic_ids = [_][]const u8{ "riscv,plic0", "sifive,plic-1.0.0" };
+const plic_mmio = firstMmioId(.intc, &plic_ids);
 pub const plic_base: usize = if (plic_mmio) |r| @intCast(r.base) else 0x0c000000;
 pub const plic_size: usize = if (plic_mmio) |r| @intCast(r.size) else 0x0400_0000;
 

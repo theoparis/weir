@@ -92,6 +92,11 @@ pub fn build(b: *std.Build) void {
     // load through the PE/COFF loader instead of the ELF path.
     const pe_app_path = b.option(std.Build.LazyPath, "pe-app", "Path to a real PE32+ EFI application to embed and load via the PE/COFF loader");
 
+    // The initial image's command line, published as its UEFI load options. A
+    // Linux EFI stub reads it as the kernel command line; an EFI application
+    // reads it as its own options.
+    const cmdline = b.option([]const u8, "cmdline", "Command line handed to the initial image as its UEFI load options (e.g. --el2 for an EFI app)");
+
     // Read the EFI application off a disk at boot instead of from an
     // embedded blob.
     const disk_boot = b.option(bool, "disk-boot", "Load the boot PE as a bare image at sector 0 of any device-tree disk, instead of an embedded blob") orelse (payload_path == null);
@@ -112,6 +117,8 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "disk_boot", disk_boot);
     options.addOption(bool, "boot_manager", boot_manager);
     options.addOption(bool, "has_initrd", initrd_path != null);
+    options.addOption(bool, "has_cmdline", cmdline != null);
+    if (cmdline) |c| options.addOption([]const u8, "cmdline", c);
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -242,6 +249,132 @@ pub fn build(b: *std.Build) void {
     run.addPassthruArgs();
     const qemu_step = b.step("qemu", "Boot Weir under qemu-system-riscv64 -machine virt");
     qemu_step.dependOn(&run.step);
+
+    // ARM64 firmware: a freestanding image that runs from QEMU's aarch64 virt
+    // pflash0 via -bios, shares the platform layer with the RISC-V firmware, and
+    // adds the AArch64 arch layer under src/arch/arm64. The main RISC-V image is
+    // untouched: src/arm64.zig is a separate root module. The linker script and
+    // compile-time SoC discovery use the same device tree QEMU generates for the
+    // machine being booted.
+    {
+        const arm64_target = b.resolveTargetQuery(.{
+            .cpu_arch = .aarch64,
+            .os_tag = .freestanding,
+            .abi = .none,
+        });
+
+        // -Ddtb allows a board tree override. Otherwise ask QEMU for the exact
+        // virt tree at build time; no checked-in/dumped DTB or dtc is required.
+        // Match the runtime machine settings so the embedded description and
+        // emulated hardware agree.
+        const arm64_dtb = if (dtb_path) |p| p else blk: {
+            const dump_dtb = b.addSystemCommand(&.{
+                "qemu-system-aarch64",
+                "-machine",
+            });
+            const generated = dump_dtb.addPrefixedOutputFileArg("virt,dumpdtb=", "arm64-virt.dtb");
+            dump_dtb.addArgs(&.{
+                "-cpu",     "cortex-a57",
+                "-smp",     "2",
+                "-m",       "2G",
+                "-display", "none",
+                "-serial",  "none",
+                "-monitor", "none",
+            });
+            break :blk generated;
+        };
+
+        // The ARM64 image's `build_options`: `has_dtb` is always true, because
+        // its whole address map comes from the tree. There is no ARM64 fallback
+        // address set to fall back to.
+        const arm64_opts = b.addOptions();
+        arm64_opts.addOption(bool, "has_dtb", true);
+        arm64_opts.addOption(bool, "has_aml", false);
+        arm64_opts.addOption(bool, "has_payload", false);
+        arm64_opts.addOption(bool, "has_pe_app", pe_app_path != null);
+        arm64_opts.addOption(bool, "disk_boot", false);
+        arm64_opts.addOption(bool, "boot_manager", false);
+        arm64_opts.addOption(bool, "has_initrd", false);
+        arm64_opts.addOption(bool, "has_cmdline", cmdline != null);
+        if (cmdline) |c| arm64_opts.addOption([]const u8, "cmdline", c);
+
+        // One options module for the whole ARM64 graph: the same option file
+        // reached through two names is two modules, and the same file may not
+        // belong to two modules.
+        const arm64_opts_mod = arm64_opts.createModule();
+
+        const arm64_conduit = b.dependency("conduit", .{
+            .target = arm64_target,
+            .optimize = optimize,
+        }).module("conduit");
+
+        // The same src/soc.zig the RISC-V firmware uses, built for AArch64
+        // against the ARM64 tree. Its accessors are what make the platform layer
+        // portable: the console and the bring-up read the addresses conduit
+        // matched, not constants of their own.
+        const arm64_soc = b.createModule(.{
+            .root_source_file = b.path("src/soc.zig"),
+            .target = arm64_target,
+            .optimize = optimize,
+        });
+        arm64_soc.addImport("conduit", arm64_conduit);
+        arm64_soc.addImport("build_options", arm64_opts_mod);
+        arm64_soc.addAnonymousImport("soc_dtb", .{ .root_source_file = arm64_dtb });
+
+        const arm64_mod = b.createModule(.{
+            .root_source_file = b.path("src/arm64.zig"),
+            .target = arm64_target,
+            .optimize = optimize,
+        });
+        arm64_mod.addImport("conduit", arm64_conduit);
+        arm64_mod.addImport("soc", arm64_soc);
+        // config.zig reads the build options (which image this is) and embeds the
+        // device tree, the same module the RISC-V image builds against.
+        arm64_mod.addImport("build_options", arm64_opts_mod);
+        arm64_mod.addAnonymousImport("weir_dtb", .{ .root_source_file = arm64_dtb });
+        // The same -Dpe-app the RISC-V image takes: a PE32+ EFI application the
+        // firmware loads when no disk offers one.
+        if (pe_app_path) |p| arm64_mod.addAnonymousImport("weir_pe_app", .{ .root_source_file = p });
+
+        const aexe = b.addExecutable(.{
+            .name = "weir-arm64",
+            .root_module = arm64_mod,
+        });
+        aexe.entry = .{ .symbol_name = "_start" };
+        aexe.setLinkerScript(genLd(b, ld_gen, arm64_dtb, "arm64-main", null));
+
+        const aelf = b.addInstallBinFile(aexe.getEmittedBin(), "weir-arm64.elf");
+        const abin = aexe.addObjCopy(.{ .format = .binary });
+        const abin_install = b.addInstallBinFile(abin.getOutput(), "weir-arm64.bin");
+
+        const arm64_step = b.step("arm64", "Build the ARM64 bring-up image");
+        arm64_step.dependOn(&aelf.step);
+        arm64_step.dependOn(&abin_install.step);
+
+        // `zig build qemu-arm64` boots it the way a real board boots: the flat
+        // image lands in pflash0 at address 0 through -bios.
+        const arun = b.addSystemCommand(&.{
+            "qemu-system-aarch64",
+            "-machine",
+            "virt",
+            "-cpu",
+            "cortex-a57",
+            // Two cores, because the tree the image embeds was dumped for two:
+            // the firmware starts the second through PSCI, and a tree that
+            // counts cores the machine does not have would ask for a core that
+            // never answers.
+            "-smp",
+            "2",
+            "-m",
+            "2G",
+            "-nographic",
+            "-bios",
+        });
+        arun.addFileArg(abin.getOutput());
+        arun.addPassthruArgs();
+        const qemu_arm64_step = b.step("qemu-arm64", "Boot the ARM64 bring-up image under qemu-system-aarch64 -machine virt");
+        qemu_arm64_step.dependOn(&arun.step);
+    }
 
     // First-stage boot loader: a separate tiny image that runs from SRAM/flash
     // at reset, brings up DRAM, and loads the main firmware into it. Hardware

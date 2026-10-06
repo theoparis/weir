@@ -1,13 +1,12 @@
 # Building
 
-Weir builds with Zig 0.16 and needs no other build tools. The `qemu` target also
-needs qemu-system-riscv64. The repository is a Nix flake, so `nix develop` gives
-you a shell with both.
+Weir builds with Zig 0.16. The QEMU targets need qemu-system-riscv64 and
+qemu-system-aarch64 respectively. The repository is a Nix flake, so `nix develop`
+provides Zig and QEMU.
 
 ```
-nix develop          # optional: a shell with Zig and QEMU
-zig build            # build the firmware and the FSBL
-zig build qemu       # boot under qemu-system-riscv64 -machine virt
+zig build qemu       # qemu-system-riscv64 -machine virt
+zig build qemu-arm64 # qemu-system-aarch64 -machine virt
 ```
 
 `zig build` installs to `zig-out/bin`:
@@ -26,6 +25,10 @@ Pass a board's device tree with `-Ddtb` to build for real hardware:
 ```
 zig build -Ddtb=board.dtb
 ```
+
+Without `-Ddtb`, the ARM64 targets ask QEMU to generate the aarch64 `virt`
+device tree at build time. No separate DTB file is needed for `zig build arm64`
+or `zig build qemu-arm64`.
 
 | Option | Meaning |
 | --- | --- |
